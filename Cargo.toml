@@ -13,9 +13,12 @@ image = "0.25"
 # Parsing
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-serde_yaml = "0.9"
-markdown = "1.0.0-alpha.20"
-regex = "1.10"
+serde_yaml_ng = "0.10"  # Successor to deprecated serde_yaml
+markdown = "1.0.0"      # Stable release with MDX support
+regex = "1.11"
+
+# File watching
+notify = "8.2"
 
 # Error handling
 anyhow = "1.0"

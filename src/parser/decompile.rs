@@ -431,7 +431,7 @@ mod tests {
     #[test]
     fn test_roundtrip_simple() {
         use crate::parser::frontmatter::parse_frontmatter;
-        use crate::parser::markdown::parse_body;
+        use crate::parser::mdx::parse_body;
 
         // Create a document
         let original = Document::new(

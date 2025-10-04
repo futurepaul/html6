@@ -1,4 +1,4 @@
-use crate::parser::{frontmatter, markdown};
+use crate::parser::{frontmatter, mdx};
 use anyhow::{Context, Result};
 use std::fs;
 
@@ -37,8 +37,8 @@ pub fn parse_hnmd(content: &str) -> Result<crate::parser::ast::Document> {
         frontmatter::parse_frontmatter(frontmatter_str)?
     };
 
-    // Parse markdown body
-    let body = markdown::parse_body(body_str)?;
+    // Parse markdown body with MDX
+    let body = mdx::parse_body(body_str)?;
 
     Ok(crate::parser::ast::Document::new(frontmatter, body))
 }

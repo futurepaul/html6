@@ -4,18 +4,17 @@ Testing layout for a **Nostr-style feed**!
 
 ---
 
-## Post 1
+## Post 1 ?
+
+nice
+
+what's up
 
 <hstack>
-
 <vstack flex="0.1">
-
 ![Avatar](apps/waffle_dog.jpeg)
-
 </vstack>
-
 <vstack flex="1">
-
 **Derek Ross** - *Oct 4, 2025, 10:21 AM*
 
 Good morning and pura vida, Nostr! It's time to create notes and send zaps! 💜👥👍
@@ -31,15 +30,10 @@ Rewarding value is in itself valuable.
 ## Post 2
 
 <hstack>
-
 <vstack flex="0.1">
-
 ![Avatar](apps/waffle_dog.jpeg)
-
 </vstack>
-
 <vstack flex="1">
-
 **Sebastix** - *Oct 4, 2025, 10:16 AM*
 
 New Nostr stats 👀
@@ -57,9 +51,6 @@ Check out [plunder.tech](https://plunder.tech) for more info!
 ## Interactive Components
 
 <vstack>
-
 <button label="Click Me" />
-
 <input name="message" placeholder="Type something..." />
-
 </vstack>

@@ -1,11 +1,11 @@
 use crate::parser::ast::{Action, Filter, Frontmatter, Pipe};
 use anyhow::{Context, Result};
-use serde_yaml::Value;
+use serde_yaml_ng::Value;
 use std::collections::HashMap;
 
 /// Parse YAML frontmatter into Frontmatter struct
 pub fn parse_frontmatter(yaml: &str) -> Result<Frontmatter> {
-    let value: Value = serde_yaml::from_str(yaml)
+    let value: Value = serde_yaml_ng::from_str(yaml)
         .context("Failed to parse YAML frontmatter")?;
 
     let obj = value

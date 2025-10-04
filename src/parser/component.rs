@@ -28,19 +28,27 @@ impl Component {
     pub fn parse(html: &str) -> Result<Self> {
         let html = html.trim();
 
-        // Check for self-closing
-        let self_closing = html.ends_with("/>");
+        // Check for self-closing first (must end with />)
+        let self_closing = html.starts_with('<') && html[1..].trim_start().contains("/>")
+            && html.find("/>").map_or(false, |pos| {
+                // Make sure /> comes before any >
+                html.find('>').map_or(true, |gt_pos| pos <= gt_pos)
+            });
+
+        // Find the FIRST > to get just the opening tag
+        // (don't use rfind as there might be nested tags in the string)
         let content = if self_closing {
-            &html[1..html.len() - 2] // Remove < and />
-        } else if html.ends_with('>') {
-            &html[1..html.len() - 1] // Remove < and >
+            let pos = html.find("/>").unwrap();
+            &html[1..pos]
+        } else if let Some(pos) = html.find('>') {
+            &html[1..pos]
         } else {
-            return Err(anyhow::anyhow!("Invalid component tag: {}", html));
+            return Err(anyhow::anyhow!("Invalid component tag (no closing >): {}", html));
         };
 
         // Split tag name from attributes
         let parts: Vec<&str> = content.trim().splitn(2, char::is_whitespace).collect();
-        let tag = parts[0].to_string();
+        let tag = parts[0].trim().to_string();
 
         let attrs = if parts.len() > 1 {
             parse_attributes(parts[1])?

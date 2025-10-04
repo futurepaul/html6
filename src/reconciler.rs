@@ -7,91 +7,44 @@
 /// - Only rebuilds changed subtrees
 
 use crate::parser::ast::Node;
-use crate::renderer;
-use masonry::core::NewWidget;
-use masonry::widgets::Flex;
-use std::collections::HashMap;
 
-/// Stable key for a widget, used to track identity across rebuilds
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
-pub enum WidgetKey {
-    /// Static key for non-dynamic content
-    Static(String),
-
-    /// Input field by name (preserves focus!)
-    Input(String),
-
-    /// List item by source and index
-    /// Example: ListItem("queries.feed", 0)
-    ListItem(String, usize),
-
-    /// Each iteration instance
-    /// Example: Each("queries.feed", 0)
-    Each(String, usize),
-
-    /// Component by path
-    /// Example: Component("vstack.0.hstack.1")
-    Component(String),
-}
-
-impl WidgetKey {
-    /// Derive a stable key from an AST node and its position in the tree
-    pub fn from_node(node: &Node, path: &str, index: usize) -> Self {
-        match node {
-            Node::Input { name, .. } => {
-                // Inputs keyed by name - preserves focus when content updates!
-                WidgetKey::Input(name.clone())
-            }
-
-            Node::Each { from, .. } => {
-                // Each loops keyed by data source and iteration index
-                WidgetKey::Each(from.clone(), index)
-            }
-
-            Node::Expr { expression } => {
-                // Expressions keyed by the expression itself
-                WidgetKey::Static(format!("expr:{}", expression))
-            }
-
-            Node::Button { .. } => {
-                // Buttons keyed by position (could be improved with on_click)
-                WidgetKey::Component(format!("{}:button:{}", path, index))
-            }
-
-            Node::VStack { .. } | Node::HStack { .. } | Node::Grid { .. } => {
-                // Layout containers keyed by position
-                WidgetKey::Component(format!("{}:{}", path, index))
-            }
-
-            Node::Heading { level, .. } => {
-                // Headings keyed by level and position
-                WidgetKey::Static(format!("h{}:{}", level, index))
-            }
-
-            _ => {
-                // Other nodes keyed by position
-                WidgetKey::Component(format!("{}:{}", path, index))
-            }
-        }
-    }
-}
-
-/// Track widget state for reconciliation (without storing actual widgets)
+/// Track widget state for reconciliation using generational indices
 #[derive(Clone)]
 pub struct WidgetState {
-    /// Stable key for tracking across rebuilds
-    pub key: WidgetKey,
-
     /// The AST node this widget was built from
     pub node: Node,
 
-    /// Path in the tree (for deriving child keys)
-    pub path: String,
+    /// Generation number (increments when this slot is reused)
+    pub generation: u32,
 }
 
 impl WidgetState {
-    pub fn new(key: WidgetKey, node: Node, path: String) -> Self {
-        Self { key, node, path }
+    pub fn new(node: Node, generation: u32) -> Self {
+        Self { node, generation }
+    }
+}
+
+/// Generational arena for tracking widgets across rebuilds
+pub struct WidgetArena {
+    /// States at each index, with generation tracking
+    pub states: Vec<WidgetState>,
+
+    /// Generations for each slot (grows but never shrinks)
+    pub generations: Vec<u32>,
+}
+
+impl WidgetArena {
+    pub fn new() -> Self {
+        Self {
+            states: Vec::new(),
+            generations: Vec::new(),
+        }
+    }
+
+    pub fn from_nodes(nodes: &[Node]) -> Self {
+        let states = nodes.iter().map(|node| WidgetState::new(node.clone(), 0)).collect();
+        let generations = vec![0; nodes.len()];
+        Self { states, generations }
     }
 }
 
@@ -107,69 +60,71 @@ pub enum ReconcileOp {
     Remove,
 }
 
-/// Reconcile old and new AST nodes, returning which operations to perform
-pub fn reconcile_nodes(
-    old: &[WidgetState],
+/// Reconcile using Xilem-style generational arena (pure positional)
+/// Returns new arena and operations to apply
+pub fn reconcile_arena(
+    arena: &WidgetArena,
     new_nodes: &[Node],
-    parent_path: &str,
-) -> (Vec<WidgetState>, Vec<ReconcileOp>) {
+) -> (WidgetArena, Vec<ReconcileOp>) {
     let mut new_states = Vec::new();
     let mut ops = Vec::new();
-    let mut old_by_key: HashMap<WidgetKey, &WidgetState> = old
-        .iter()
-        .map(|w| (w.key.clone(), w))
-        .collect();
 
-    for (index, new_node) in new_nodes.iter().enumerate() {
-        let path = if parent_path.is_empty() {
-            index.to_string()
-        } else {
-            format!("{}.{}", parent_path, index)
-        };
+    // Ensure generations vec is large enough (never shrinks)
+    let mut generations = arena.generations.clone();
+    if generations.len() < new_nodes.len() {
+        generations.resize(new_nodes.len(), 0);
+    }
 
-        let new_key = WidgetKey::from_node(new_node, parent_path, index);
+    // Process each position - pure Xilem approach
+    for (idx, new_node) in new_nodes.iter().enumerate() {
+        let old_state = arena.states.get(idx);
 
-        // Try to find matching old widget by key
-        if let Some(old_state) = old_by_key.remove(&new_key) {
-            // Found a widget with the same key
+        if let Some(old_state) = old_state {
+            // There was a widget at this position before
             if nodes_equal(&old_state.node, new_node) {
-                // Node unchanged - keep widget
+                // Same node - keep it
                 new_states.push(old_state.clone());
                 ops.push(ReconcileOp::Keep);
             } else {
-                // Node changed - rebuild
-                new_states.push(WidgetState::new(new_key, new_node.clone(), path));
+                // Different node - increment generation and rebuild
+                generations[idx] += 1;
+                new_states.push(WidgetState::new(new_node.clone(), generations[idx]));
                 ops.push(ReconcileOp::Rebuild);
             }
         } else {
-            // New widget - add it
-            new_states.push(WidgetState::new(new_key, new_node.clone(), path));
+            // New position (list grew)
+            new_states.push(WidgetState::new(new_node.clone(), generations[idx]));
             ops.push(ReconcileOp::Add);
         }
     }
 
-    // Widgets remaining in old_by_key were removed
-    for _ in old_by_key.values() {
-        ops.push(ReconcileOp::Remove);
-    }
+    let new_arena = WidgetArena {
+        states: new_states,
+        generations,
+    };
 
-    (new_states, ops)
+    (new_arena, ops)
+}
+
+/// Legacy reconcile for compatibility
+pub fn reconcile_nodes(
+    old: &[WidgetState],
+    new_nodes: &[Node],
+    _parent_path: &str,
+) -> (Vec<WidgetState>, Vec<ReconcileOp>) {
+    let arena = WidgetArena {
+        states: old.to_vec(),
+        generations: vec![0; old.len().max(new_nodes.len())],
+    };
+    let (new_arena, ops) = reconcile_arena(&arena, new_nodes);
+    (new_arena.states, ops)
 }
 
 /// Build a fresh widget tree from nodes and return the states
-pub fn build_widget_tree(nodes: &[Node], parent_path: &str) -> Vec<WidgetState> {
+pub fn build_widget_tree(nodes: &[Node], _parent_path: &str) -> Vec<WidgetState> {
     nodes
         .iter()
-        .enumerate()
-        .map(|(index, node)| {
-            let path = if parent_path.is_empty() {
-                index.to_string()
-            } else {
-                format!("{}.{}", parent_path, index)
-            };
-            let key = WidgetKey::from_node(node, parent_path, index);
-            WidgetState::new(key, node.clone(), path)
-        })
+        .map(|node| WidgetState::new(node.clone(), 0))
         .collect()
 }
 
@@ -246,20 +201,31 @@ fn children_equal(a: &[Node], b: &[Node]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(a, b)| nodes_equal(a, b))
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::parser::ast::Node;
 
     #[test]
-    fn test_key_derivation() {
-        let input = Node::input("message");
-        let key = WidgetKey::from_node(&input, "", 0);
-        assert_eq!(key, WidgetKey::Input("message".to_string()));
+    fn test_generation_tracking() {
+        let old_nodes = vec![Node::text("A"), Node::text("B")];
+        let arena = WidgetArena::from_nodes(&old_nodes);
 
-        let button = Node::button(None, vec![Node::text("Click")]);
-        let key = WidgetKey::from_node(&button, "root", 5);
-        assert!(matches!(key, WidgetKey::Component(_)));
+        assert_eq!(arena.states.len(), 2);
+        assert_eq!(arena.generations, vec![0, 0]);
+
+        // Change second node
+        let new_nodes = vec![Node::text("A"), Node::text("C")];
+        let (new_arena, ops) = reconcile_arena(&arena, &new_nodes);
+
+        assert_eq!(ops.len(), 2);
+        assert!(matches!(ops[0], ReconcileOp::Keep));
+        assert!(matches!(ops[1], ReconcileOp::Rebuild));
+
+        // Generation incremented for changed node
+        assert_eq!(new_arena.generations[0], 0); // Unchanged
+        assert_eq!(new_arena.generations[1], 1); // Incremented
     }
 
     #[test]
@@ -280,38 +246,22 @@ mod tests {
     }
 
     #[test]
-    fn test_reconciliation_ops() {
-        // Create old tree state - use Inputs so keys are unique
-        let old_states = build_widget_tree(&vec![
-            Node::input("field1"),
-            Node::input("field2"),
-            Node::input("field3"),
-        ], "");
+    fn test_positional_reconciliation() {
+        let old_nodes = vec![Node::text("A"), Node::text("B"), Node::text("C")];
+        let arena = WidgetArena::from_nodes(&old_nodes);
 
-        // New tree with changes
-        let new_nodes = vec![
-            Node::input("field1"),      // Same - Keep
-            Node::input("field2_new"),  // Different key - Add (field2 removed)
-            Node::input("field4"),      // New - Add
-        ];
+        // Insert a new node at position 1
+        let new_nodes = vec![Node::text("A"), Node::text("NEW"), Node::text("B"), Node::text("C")];
+        let (new_arena, ops) = reconcile_arena(&arena, &new_nodes);
 
-        let (new_states, ops) = reconcile_nodes(&old_states, &new_nodes, "");
-
-        assert_eq!(new_states.len(), 3);
-        assert_eq!(ops.len(), 5); // 1 Keep, 2 Add, 2 Remove
-
-        // First input unchanged (same key and content) - should Keep
+        assert_eq!(ops.len(), 4);
+        // Position 0: "A" → "A" = Keep
         assert!(matches!(ops[0], ReconcileOp::Keep));
-        assert_eq!(new_states[0].node, old_states[0].node);
-
-        // Second input has different key - should Add
-        assert!(matches!(ops[1], ReconcileOp::Add));
-
-        // Third input is new - should Add
-        assert!(matches!(ops[2], ReconcileOp::Add));
-
-        // Old field2 and field3 removed
-        assert!(matches!(ops[3], ReconcileOp::Remove));
-        assert!(matches!(ops[4], ReconcileOp::Remove));
+        // Position 1: "B" → "NEW" = Rebuild (different content at same position)
+        assert!(matches!(ops[1], ReconcileOp::Rebuild));
+        // Position 2: "C" → "B" = Rebuild
+        assert!(matches!(ops[2], ReconcileOp::Rebuild));
+        // Position 3: nothing → "C" = Add
+        assert!(matches!(ops[3], ReconcileOp::Add));
     }
 }

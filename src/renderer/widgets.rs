@@ -352,13 +352,21 @@ fn node_to_text(node: &Node) -> String {
 
 /// Build a complete document widget tree
 pub fn build_document_widget(nodes: &[Node]) -> NewWidget<Flex> {
+    build_document_widget_tagged(nodes, None)
+}
+
+pub fn build_document_widget_tagged(nodes: &[Node], tag: Option<masonry::core::WidgetTag<Flex>>) -> NewWidget<Flex> {
     let mut flex = Flex::column();
 
     for node in nodes {
         flex = flex.with_child(build_widget(node));
     }
 
-    NewWidget::new(flex)
+    if let Some(tag) = tag {
+        NewWidget::new_with_tag(flex, tag)
+    } else {
+        NewWidget::new(flex)
+    }
 }
 
 /// Load an image from a file path and convert to ImageBrush

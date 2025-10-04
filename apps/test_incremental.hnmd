@@ -1,0 +1,22 @@
+# Incremental Update Test
+
+This file tests that incremental updates work correctly.
+
+## Instructions
+
+1. Run the app with this file
+2. Type something in the input field below
+3. Edit THIS TEXT and save
+4. The input should KEEP its text and focus!
+
+<input name="test_field" placeholder="Type here and then edit the file..." />
+
+## Static Content
+
+This paragraph won't change.
+
+<button label="Static Button" />
+
+## End
+
+Footer text.

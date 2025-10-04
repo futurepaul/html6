@@ -57,29 +57,47 @@ impl AppDriver for Driver {
                     let keeps = ops.iter().filter(|op| matches!(op, reconciler::ReconcileOp::Keep)).count();
                     let rebuilds = ops.iter().filter(|op| matches!(op, reconciler::ReconcileOp::Rebuild)).count();
                     let adds = ops.iter().filter(|op| matches!(op, reconciler::ReconcileOp::Add)).count();
-                    let removes = ops.iter().filter(|op| matches!(op, reconciler::ReconcileOp::Remove)).count();
+                    let removes = self.widget_states.len().saturating_sub(doc.body.len());
 
                     println!("  📊 Reconciliation: {} kept, {} rebuilt, {} added, {} removed",
                         keeps, rebuilds, adds, removes);
+                    println!("  📐 Ops: {} ops for {} nodes (old had {} nodes)",
+                        ops.len(), doc.body.len(), self.widget_states.len());
 
-                    // For now, just do a full rebuild (keyed reconciliation implementation coming)
-                    // TODO: Use ops to do incremental updates
-                    let new_content = renderer::build_document_widget(&doc.body);
-
-                    // Replace the content in the Portal
+                    // Apply updates using positional reconciliation
                     let render_root = ctx.render_root(window_id);
                     render_root.edit_widget_with_tag(CONTENT_TAG, |mut content_flex| {
-                        // Clear existing children
-                        Flex::clear(&mut content_flex);
+                        // Process each position
+                        for (idx, (node, op)) in doc.body.iter().zip(ops.iter()).enumerate() {
+                            match op {
+                                reconciler::ReconcileOp::Keep => {
+                                    // Widget at this position unchanged - leave it alone
+                                }
+                                reconciler::ReconcileOp::Rebuild => {
+                                    // Widget at this position changed - replace it
+                                    Flex::remove_child(&mut content_flex, idx);
+                                    Flex::insert_child(&mut content_flex, idx, renderer::build_widget(node));
+                                }
+                                reconciler::ReconcileOp::Add => {
+                                    // New position (list grew) - append
+                                    Flex::add_child(&mut content_flex, renderer::build_widget(node));
+                                }
+                                reconciler::ReconcileOp::Remove => {
+                                    // Not used in generational approach
+                                }
+                            }
+                        }
 
-                        // Add new widget tree
-                        Flex::add_child(&mut content_flex, new_content);
+                        // Shrink if list got smaller
+                        while content_flex.widget.len() > doc.body.len() {
+                            Flex::remove_child(&mut content_flex, doc.body.len());
+                        }
                     });
 
                     // Update stored states
                     self.widget_states = new_states;
 
-                    println!("✅ UI reloaded successfully!\n");
+                    println!("✅ UI updated incrementally!\n");
                 }
                 Err(e) => {
                     eprintln!("❌ Failed to reload: {}\n", e);
@@ -137,11 +155,19 @@ fn node_type(node: &html6::parser::ast::Node) -> String {
 }
 
 fn main() {
-    const HNMD_FILE: &str = "apps/hello.hnmd";
+    // Get file path from command line args or use default
+    let args: Vec<String> = std::env::args().collect();
+    let hnmd_file = if args.len() > 1 {
+        args[1].as_str()
+    } else {
+        "apps/hello.hnmd"
+    };
+
+    println!("📂 Loading: {}\n", hnmd_file);
 
     // Load and parse .hnmd file
-    let doc = loader::load_hnmd(HNMD_FILE)
-        .expect("Failed to load hello.hnmd");
+    let doc = loader::load_hnmd(hnmd_file)
+        .expect(&format!("Failed to load {}", hnmd_file));
 
     // Print AST on startup
     print_ast(&doc);
@@ -149,16 +175,11 @@ fn main() {
     // Build initial widget states for reconciliation
     let initial_states = reconciler::build_widget_tree(&doc.body, "");
 
-    // Build widget tree from AST
-    // Wrap in tagged Flex so we can update it later
-    let content = renderer::build_document_widget(&doc.body);
-    let content_flex = masonry::core::NewWidget::new_with_tag(
-        Flex::column().with_child(content),
-        CONTENT_TAG,
-    );
+    // Build widget tree from AST with tag for updates
+    let content = renderer::build_document_widget_tagged(&doc.body, Some(CONTENT_TAG));
 
     // Wrap in Portal for scrolling
-    let root_widget = masonry::core::NewWidget::new(Portal::new(content_flex));
+    let root_widget = masonry::core::NewWidget::new(Portal::new(content));
 
     // Create window
     let window_size = LogicalSize::new(600.0, 800.0);
@@ -169,7 +190,7 @@ fn main() {
 
     let driver = Driver {
         window_id: WindowId::next(),
-        hnmd_path: HNMD_FILE.to_string(),
+        hnmd_path: hnmd_file.to_string(),
         widget_states: initial_states,
     };
 
@@ -202,7 +223,7 @@ fn main() {
     let proxy = event_loop.create_proxy();
 
     // Set up file watcher with proxy
-    let hnmd_path = HNMD_FILE.to_string();
+    let watch_path = hnmd_file.to_string();
     let (file_tx, file_rx) = mpsc::channel();
     let mut watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
         if let Ok(event) = res {
@@ -212,7 +233,7 @@ fn main() {
         }
     }).expect("Failed to create file watcher");
 
-    watcher.watch(Path::new(HNMD_FILE), RecursiveMode::NonRecursive)
+    watcher.watch(Path::new(&watch_path), RecursiveMode::NonRecursive)
         .expect("Failed to watch file");
 
     // Spawn thread to watch for file changes and send reload actions

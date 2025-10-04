@@ -1,7 +1,7 @@
 // On Windows platform, don't show a console when opening the app.
 #![windows_subsystem = "windows"]
 
-use html6::{loader, renderer};
+use html6::{loader, reconciler, renderer};
 use masonry::core::{ErasedAction, WidgetId, WidgetTag};
 use masonry::dpi::LogicalSize;
 use masonry::peniko::color::AlphaColor;
@@ -20,6 +20,7 @@ const CONTENT_TAG: WidgetTag<Flex> = WidgetTag::new("content");
 struct Driver {
     window_id: WindowId,
     hnmd_path: String,
+    widget_states: Vec<reconciler::WidgetState>,
 }
 
 // Custom action to trigger reload
@@ -45,7 +46,24 @@ impl AppDriver for Driver {
                 Ok(doc) => {
                     print_ast(&doc);
 
-                    // Rebuild widget tree
+                    // Reconcile old and new AST
+                    let (new_states, ops) = reconciler::reconcile_nodes(
+                        &self.widget_states,
+                        &doc.body,
+                        "",
+                    );
+
+                    // Count operations for reporting
+                    let keeps = ops.iter().filter(|op| matches!(op, reconciler::ReconcileOp::Keep)).count();
+                    let rebuilds = ops.iter().filter(|op| matches!(op, reconciler::ReconcileOp::Rebuild)).count();
+                    let adds = ops.iter().filter(|op| matches!(op, reconciler::ReconcileOp::Add)).count();
+                    let removes = ops.iter().filter(|op| matches!(op, reconciler::ReconcileOp::Remove)).count();
+
+                    println!("  📊 Reconciliation: {} kept, {} rebuilt, {} added, {} removed",
+                        keeps, rebuilds, adds, removes);
+
+                    // For now, just do a full rebuild (keyed reconciliation implementation coming)
+                    // TODO: Use ops to do incremental updates
                     let new_content = renderer::build_document_widget(&doc.body);
 
                     // Replace the content in the Portal
@@ -57,6 +75,9 @@ impl AppDriver for Driver {
                         // Add new widget tree
                         Flex::add_child(&mut content_flex, new_content);
                     });
+
+                    // Update stored states
+                    self.widget_states = new_states;
 
                     println!("✅ UI reloaded successfully!\n");
                 }
@@ -125,6 +146,9 @@ fn main() {
     // Print AST on startup
     print_ast(&doc);
 
+    // Build initial widget states for reconciliation
+    let initial_states = reconciler::build_widget_tree(&doc.body, "");
+
     // Build widget tree from AST
     // Wrap in tagged Flex so we can update it later
     let content = renderer::build_document_widget(&doc.body);
@@ -146,6 +170,7 @@ fn main() {
     let driver = Driver {
         window_id: WindowId::next(),
         hnmd_path: HNMD_FILE.to_string(),
+        widget_states: initial_states,
     };
 
     // Create custom theme with black text on light gray background

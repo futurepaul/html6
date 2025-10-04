@@ -4,34 +4,47 @@
 
 **Completed Phases:**
 - ✅ Phase 0: Project Setup
-- ✅ Phase 1: Parser Foundation (all 5 sub-phases)
+- ✅ Phase 1: Parser Foundation (all 5 sub-phases) - **UPGRADED TO MDX!**
 - ✅ Phase 2: Static Rendering (all 3 sub-phases)
+- ✅ Phase 2.5: Live Development & Reconciliation (NEW!)
 
-**Test Status:** 71/73 tests passing
+**Test Status:** 65/65 tests passing
 
 **What Works:**
+- **MDX-based parsing** - native JSX support, no whitespace sensitivity!
 - Full .hnmd parsing (frontmatter + markdown + JSX components)
-- Static rendering to native Masonry widgets
+- Live file watching with hot reload - edit and see changes instantly
+- **Keyed widget reconciliation** - tracks what changed between renders
+- Static rendering to native Masonry widgets with image support
 - All markdown features (headings, paragraphs, lists, bold, italic, links, images)
-- Layout components (vstack, hstack, grid, spacer)
+- Layout components (vstack, hstack, grid, spacer) with flex support
 - Interactive component shells (buttons, inputs) - awaiting runtime for actions
 - Roundtrip decompilation (AST → hnmd → AST)
+- AST visualization in console on every file change
 
-**Next Up:** Phase 3 - Expression Evaluation with jaq
+**Recent Improvements:**
+- 74% code reduction in parser (1000+ lines → 260 lines)
+- Stable markdown 1.0.0 (was alpha)
+- Updated all dependencies (serde_yaml_ng, notify 8.2, etc.)
+- No blank lines needed between components!
+
+**Next Up:** Phase 3 - Expression Evaluation with jaq + Apply Reconciliation Ops
 
 ---
 
 ## Architecture Decisions (Finalized)
 
-✅ **Parsing**: markdown-rs + custom JSX parser (Option A)
-✅ **Attribute Syntax**: Single curly braces `from={queries.feed}` (JSX-style)
+✅ **Parsing**: **markdown-rs with native MDX support** (UPGRADED!)
+✅ **Attribute Syntax**: Single curly braces `from={queries.feed}` (standard MDX/JSX)
 ✅ **Frontmatter**: Four sections (filters, pipes, actions, state)
-✅ **Reactive Runtime**: tokio + async-stream + broadcast channels
-✅ **Pipe Engine**: jaq (pure Rust jq implementation)
-✅ **Component Rendering**: Direct Masonry with keyed components for smart updates
-✅ **Expression Evaluation**: jaq for all expressions (consistent!)
-✅ **Nostr Library**: nostr-sdk
+✅ **Reactive Runtime**: tokio + async-stream + broadcast channels (planned)
+✅ **Pipe Engine**: jaq (pure Rust jq implementation) (planned)
+✅ **Component Rendering**: Direct Masonry with keyed reconciliation for smart updates
+✅ **Expression Evaluation**: jaq for all expressions (consistent!) (planned)
+✅ **Nostr Library**: nostr-sdk (planned)
 ✅ **No `$` prefix**: Except in actual jq syntax within pipes
+✅ **Live Reload**: File watching with EventLoopProxy and reconciliation
+✅ **No Whitespace Sensitivity**: MDX handles components properly regardless of blank lines
 
 ---
 
@@ -550,6 +563,48 @@ This is a **static** test.
   <button>Click me (does nothing yet)</button>
 </vstack>
 ```
+
+---
+
+### Phase 2.5: Live Development & Reconciliation ✅
+
+**Goal**: Hot reload with intelligent diffing
+
+#### 2.5.1: File Watching ✅
+
+**Tasks**:
+- [x] Add notify dependency
+- [x] Watch .hnmd file for changes
+- [x] Send events via EventLoopProxy
+- [x] Custom ReloadAction to trigger updates
+
+#### 2.5.2: Keyed Widget Reconciliation ✅
+
+**Tasks**:
+- [x] Create WidgetKey enum (Input, Each, Static, Component)
+- [x] Create WidgetState to track nodes without storing widgets
+- [x] Implement reconcile_nodes() diffing algorithm
+- [x] Return ReconcileOp (Keep, Rebuild, Add, Remove)
+- [x] Store widget states in Driver
+- [x] Report reconciliation stats in console
+
+**Current Status:**
+- ✅ Reconciliation working - identifies what changed
+- ⚠️ Still doing full rebuild (safe, always works)
+- 🔜 TODO: Apply ops incrementally (needs Masonry indexed child API)
+
+**Why not incremental yet:**
+Masonry's Flex widget doesn't have API for:
+- Replacing child at specific index
+- Inserting child at specific index
+- Removing child at specific index
+
+**Options:**
+1. Wait for Masonry API improvements
+2. Use WidgetTags for every child (verbose but works)
+3. Accept full rebuild for now (fast enough for HNMD use case)
+
+**Recommendation:** Accept full rebuild until Nostr live updates (Phase 4-6) make it necessary. The reconciler correctly identifies changes - that's the hard part!
 
 ---
 

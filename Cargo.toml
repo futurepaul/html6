@@ -24,6 +24,13 @@ notify = "8.2"
 jaq-interpret = "1.2"
 jaq-parse = "1.0"
 
+# Nostr
+nostr-sdk = "0.43"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
 # Error handling
 anyhow = "1.0"
 thiserror = "2.0"

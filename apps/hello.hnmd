@@ -1,6 +1,20 @@
-# HNMD Feed Demo
+---
+state:
+  appName: "HNMD Demo"
+  version: "0.1.0"
+  count: 77 
+  message: "Hello from Phase 3!"
+---
+
+# {state.appName}
 
 Testing layout for a **Nostr-style feed**!
+
+**Version:** {state.version}
+
+**Count:** {state.count}
+
+**Message:** {state.message}
 
 new line!
 

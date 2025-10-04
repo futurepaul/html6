@@ -10,6 +10,8 @@ pub fn parse_body(source: &str) -> Result<Vec<Node>> {
     // Enable MDX JSX parsing (disable HTML parsing as it conflicts)
     options.constructs.mdx_jsx_flow = true;  // Block-level JSX components
     options.constructs.mdx_jsx_text = true;  // Inline JSX components
+    options.constructs.mdx_expression_flow = true;  // Block-level expressions {expr}
+    options.constructs.mdx_expression_text = true;  // Inline expressions {expr}
     options.constructs.html_flow = false;    // Must disable when using MDX JSX
     options.constructs.html_text = false;    // Must disable when using MDX JSX
 
@@ -471,5 +473,35 @@ More text."#;
         assert!(matches!(&nodes[0], Node::Heading { .. }));
         assert!(matches!(&nodes[1], Node::Paragraph { .. }));
         assert!(matches!(&nodes[2], Node::VStack { .. }));
+    }
+
+    #[test]
+    fn test_parse_inline_expressions() {
+        let md = r#"# {state.title}
+
+Hello {user.name}!"#;
+
+        let nodes = parse_body(md).unwrap();
+
+        // First should be heading with expression
+        match &nodes[0] {
+            Node::Heading { children, .. } => {
+                assert_eq!(children.len(), 1);
+                assert!(matches!(&children[0], Node::Expr { expression } if expression == "state.title"));
+            }
+            _ => panic!("Expected heading"),
+        }
+
+        // Second should be paragraph with text and expression
+        match &nodes[1] {
+            Node::Paragraph { children } => {
+                assert!(children.len() >= 2);
+                // Should have both text and expr nodes
+                let has_text = children.iter().any(|c| matches!(c, Node::Text { .. }));
+                let has_expr = children.iter().any(|c| matches!(c, Node::Expr { expression } if expression == "user.name"));
+                assert!(has_text && has_expr);
+            }
+            _ => panic!("Expected paragraph"),
+        }
     }
 }

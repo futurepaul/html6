@@ -1,7 +1,7 @@
 // On Windows platform, don't show a console when opening the app.
 #![windows_subsystem = "windows"]
 
-use html6::{loader, reconciler, renderer};
+use html6::{loader, reconciler, renderer, runtime::RuntimeContext};
 use masonry::core::{ErasedAction, WidgetId, WidgetTag};
 use masonry::dpi::LogicalSize;
 use masonry::peniko::color::AlphaColor;
@@ -21,6 +21,7 @@ struct Driver {
     window_id: WindowId,
     hnmd_path: String,
     widget_states: Vec<reconciler::WidgetState>,
+    render_ctx: Option<renderer::RenderContext>,
 }
 
 // Custom action to trigger reload
@@ -46,12 +47,27 @@ impl AppDriver for Driver {
                 Ok(doc) => {
                     print_ast(&doc);
 
-                    // Reconcile old and new AST
-                    let (new_states, ops) = reconciler::reconcile_nodes(
-                        &self.widget_states,
+                    // Create runtime context from frontmatter state
+                    let runtime_ctx = RuntimeContext::with_state(doc.frontmatter.state.clone());
+                    let render_ctx = renderer::RenderContext::new(runtime_ctx);
+
+                    // Debug: print state changes
+                    println!("  🔍 New state: {:?}", doc.frontmatter.state);
+
+                    self.render_ctx = Some(render_ctx.clone());
+
+                    // Reconcile old and new AST with context for expr hash tracking
+                    let arena = reconciler::WidgetArena {
+                        states: self.widget_states.clone(),
+                        generations: vec![0; self.widget_states.len().max(doc.body.len())],
+                    };
+                    let mut reconcile_ctx = self.render_ctx.clone();
+                    let (new_arena, ops) = reconciler::reconcile_arena(
+                        &arena,
                         &doc.body,
-                        "",
+                        &mut reconcile_ctx,
                     );
+                    let new_states = new_arena.states;
 
                     // Count operations for reporting
                     let keeps = ops.iter().filter(|op| matches!(op, reconciler::ReconcileOp::Keep)).count();
@@ -76,11 +92,11 @@ impl AppDriver for Driver {
                                 reconciler::ReconcileOp::Rebuild => {
                                     // Widget at this position changed - replace it
                                     Flex::remove_child(&mut content_flex, idx);
-                                    Flex::insert_child(&mut content_flex, idx, renderer::build_widget(node));
+                                    Flex::insert_child(&mut content_flex, idx, renderer::build_widget_with_context(node, self.render_ctx.clone()));
                                 }
                                 reconciler::ReconcileOp::Add => {
                                     // New position (list grew) - append
-                                    Flex::add_child(&mut content_flex, renderer::build_widget(node));
+                                    Flex::add_child(&mut content_flex, renderer::build_widget_with_context(node, self.render_ctx.clone()));
                                 }
                                 reconciler::ReconcileOp::Remove => {
                                     // Not used in generational approach
@@ -172,11 +188,16 @@ fn main() {
     // Print AST on startup
     print_ast(&doc);
 
-    // Build initial widget states for reconciliation
-    let initial_states = reconciler::build_widget_tree(&doc.body, "");
+    // Create runtime context from frontmatter state
+    let runtime_ctx = RuntimeContext::with_state(doc.frontmatter.state.clone());
+    let render_ctx = renderer::RenderContext::new(runtime_ctx);
 
-    // Build widget tree from AST with tag for updates
-    let content = renderer::build_document_widget_tagged(&doc.body, Some(CONTENT_TAG));
+    // Build initial widget states for reconciliation with context
+    let mut initial_ctx = Some(render_ctx.clone());
+    let initial_states = reconciler::build_widget_tree(&doc.body, &mut initial_ctx);
+
+    // Build widget tree from AST with tag for updates and context
+    let content = renderer::build_document_widget_with_context(&doc.body, Some(render_ctx.clone()), Some(CONTENT_TAG));
 
     // Wrap in Portal for scrolling
     let root_widget = masonry::core::NewWidget::new(Portal::new(content));
@@ -192,6 +213,7 @@ fn main() {
         window_id: WindowId::next(),
         hnmd_path: hnmd_file.to_string(),
         widget_states: initial_states,
+        render_ctx: Some(render_ctx),
     };
 
     // Create custom theme with black text on light gray background

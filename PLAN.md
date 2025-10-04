@@ -6,15 +6,18 @@
 - ✅ Phase 0: Project Setup
 - ✅ Phase 1: Parser Foundation (all 5 sub-phases) - **UPGRADED TO MDX!**
 - ✅ Phase 2: Static Rendering (all 3 sub-phases)
-- ✅ Phase 2.5: Live Development & Reconciliation (NEW!)
+- ✅ Phase 2.5: Live Development & Reconciliation
+- ✅ Phase 3: Expression Evaluation with jaq (basic, needs optimization)
 
-**Test Status:** 65/65 tests passing
+**Test Status:** 79/79 tests passing
 
 **What Works:**
 - **MDX-based parsing** - native JSX support, no whitespace sensitivity!
 - Full .hnmd parsing (frontmatter + markdown + JSX components)
 - Live file watching with hot reload - edit and see changes instantly
-- **Keyed widget reconciliation** - tracks what changed between renders
+- **Positional reconciliation** - tracks what changed between renders
+- **Expression evaluation** - `{state.count}` renders actual values
+- **Reactive state updates** - changing state triggers rebuilds (conservative approach)
 - Static rendering to native Masonry widgets with image support
 - All markdown features (headings, paragraphs, lists, bold, italic, links, images)
 - Layout components (vstack, hstack, grid, spacer) with flex support
@@ -23,12 +26,18 @@
 - AST visualization in console on every file change
 
 **Recent Improvements:**
-- 74% code reduction in parser (1000+ lines → 260 lines)
-- Stable markdown 1.0.0 (was alpha)
-- Updated all dependencies (serde_yaml_ng, notify 8.2, etc.)
-- No blank lines needed between components!
+- jaq integration for expression evaluation with caching
+- MDX expression parsing enabled (`mdx_expression_text`, `mdx_expression_flow`)
+- Context-aware widget rendering
+- Conservative reconciliation: rebuilds any node containing expressions
+- Removed legacy reconciliation APIs
 
-**Next Up:** Phase 3 - Expression Evaluation with jaq + Apply Reconciliation Ops
+**Known Limitations:**
+- Reconciliation currently rebuilds entire nodes containing expressions (not granular)
+- Expression hashes implemented but not yet used for fine-grained updates
+- Need to optimize: should only rebuild when expression *values* change, not on every reload
+
+**Next Up:** Optimize reconciliation to use expression value hashes properly
 
 ---
 
@@ -666,193 +675,76 @@ Phase 3 is required to solve the input focus issue from Phase 2.5!
 - Rebuilding input just resets widget to form state value
 - This is how Xilem handles it (see xilem/src/view/text_input.rs)
 
-#### 3.1: jaq Integration
+#### 3.1: jaq Integration ✅
 
-Wrapper around jaq for expression evaluation:
+**Completed:**
+- ✅ Implemented JaqEvaluator wrapper with expression caching
+- ✅ Added jaq-interpret and jaq-parse dependencies
+- ✅ Conversion between jaq Val and serde_json::Value
+- ✅ Error handling for compilation and execution failures
+- ✅ Tests for simple paths, array access, fallback operator
 
-```rust
-// src/runtime/jaq.rs
-
-use jaq_interpret::{Ctx, FilterT, RcIter, Val};
-use serde_json::Value;
-
-pub struct JaqEvaluator {
-    // Cache compiled filters
-    cache: HashMap<String, jaq_interpret::Filter>,
-}
-
-impl JaqEvaluator {
-    pub fn new() -> Self {
-        Self { cache: HashMap::new() }
-    }
-
-    pub fn eval(&mut self, expr: &str, context: &Value) -> Result<Value> {
-        // Compile jq expression (or get from cache)
-        let filter = self.compile(expr)?;
-
-        // Convert context to jaq Val
-        let val = Val::from(context.clone());
-
-        // Execute
-        let inputs = RcIter::new(core::iter::empty());
-        let result = filter
-            .run((Ctx::new([], &inputs), val))
-            .next()
-            .ok_or(Error::NoResult)??;
-
-        // Convert back to serde_json::Value
-        Ok(val_to_json(result))
-    }
-
-    fn compile(&mut self, expr: &str) -> Result<jaq_interpret::Filter> {
-        if let Some(cached) = self.cache.get(expr) {
-            return Ok(cached.clone());
-        }
-
-        let mut defs = jaq_interpret::ParseCtx::new(Vec::new());
-        let (filter, errs) = jaq_parse::parse(expr, jaq_parse::main());
-
-        if !errs.is_empty() {
-            return Err(Error::JaqParse(errs));
-        }
-
-        let filter = defs.compile(filter.ok_or(Error::NoFilter)?);
-        self.cache.insert(expr.to_string(), filter.clone());
-
-        Ok(filter)
-    }
-}
-
-fn val_to_json(val: Val) -> Value {
-    // Convert jaq Val to serde_json::Value
-    // Handle strings, numbers, bools, arrays, objects, null
-}
-```
-
-**Tasks**:
-- [ ] Implement jaq wrapper with caching
-- [ ] Handle jaq compilation errors gracefully
-- [ ] Convert between jaq Val and serde_json::Value
-- [ ] Test basic expressions: `.user.name`, `.queries.feed[0].content`
-- [ ] Test fallback operator: `.user.name // "Anon"`
-
-**Tests**:
-- [ ] Eval simple path: `.name` with `{"name": "Alice"}` → `"Alice"`
-- [ ] Eval array access: `.[0]` with `[1,2,3]` → `1`
-- [ ] Eval fallback: `.missing // "default"` → `"default"`
-- [ ] Eval complex: `.[] | select(.age > 18)` → filter array
+**Implementation notes:**
+- ParseCtx doesn't implement Clone, required manual Clone impl
+- Cache stores compiled filters for performance
+- All 12 jaq tests passing
 
 ---
 
-#### 3.2: Runtime Context Builder
+#### 3.2: Runtime Context Builder ✅
 
-Build the context object that expressions evaluate against:
+**Completed:**
+- ✅ RuntimeContext with user, queries, state, form fields
+- ✅ Context serialization to JSON for jaq evaluation
+- ✅ Auto-prepend `.` to expressions for jq compatibility
+- ✅ Integration with frontmatter state
 
-```rust
-// src/runtime/context.rs
-
-#[derive(Debug, Clone)]
-pub struct RuntimeContext {
-    pub user: Value,      // {pubkey, profile}
-    pub queries: Value,   // {feed: [...], profile: {...}}
-    pub state: Value,     // App state
-    pub form: HashMap<String, String>,  // Form values - CRITICAL for input persistence!
-}
-
-// IMPORTANT: form is HashMap not Value for easy mutation
-// When input changes, we do: ctx.form.insert(name, new_value)
-// When rebuilding input: TextInput::new(&ctx.form.get(name).unwrap_or(""))
-// This is the Xilem controlled input pattern!
-
-impl RuntimeContext {
-    pub fn new() -> Self {
-        Self {
-            user: json!({}),
-            queries: json!({}),
-            state: json!({}),
-            form: json!({}),
-        }
-    }
-
-    pub fn to_json(&self) -> Value {
-        json!({
-            "user": self.user,
-            "queries": self.queries,
-            "state": self.state,
-            "form": self.form,
-        })
-    }
-
-    pub fn eval(&self, expr: &str, evaluator: &mut JaqEvaluator) -> Result<Value> {
-        // Prepend `.` if not present
-        let jq_expr = if expr.starts_with('.') {
-            expr.to_string()
-        } else {
-            format!(".{}", expr)
-        };
-
-        evaluator.eval(&jq_expr, &self.to_json())
-    }
-}
-```
-
-**Tasks**:
-- [ ] Define context structure
-- [ ] Build context from app state
-- [ ] Evaluate expressions against context
+**Implementation notes:**
+- Form state is HashMap for future input binding
+- Context is cloneable for passing to reconciliation
+- State loaded from frontmatter on file load
 
 ---
 
-#### 3.3: Expression Rendering
+#### 3.3: Expression Rendering ✅
 
-Update widget builder to evaluate expressions:
+**Completed:**
+- ✅ RenderContext combining RuntimeContext + JaqEvaluator
+- ✅ Context-aware widget builders (build_widget_with_context)
+- ✅ Expression evaluation in headings, paragraphs, inline text
+- ✅ Error display for failed evaluations
+- ✅ value_to_string helper for all JSON types
 
-```rust
-// src/renderer/widgets.rs (updated)
+**Implementation notes:**
+- Created context-aware versions of all text rendering functions
+- Expressions in nested nodes (inside Strong, Emphasis, etc.) are evaluated
+- Integration test verifies full pipeline: parse → evaluate → render
 
-pub struct RenderContext {
-    pub runtime_ctx: RuntimeContext,
-    pub evaluator: JaqEvaluator,
-}
+---
 
-pub fn build_widget_with_context(node: &Node, ctx: &mut RenderContext) -> Box<dyn Widget> {
-    match node {
-        Node::Expr { expression } => {
-            // Evaluate expression
-            let result = ctx.runtime_ctx.eval(expression, &mut ctx.evaluator)
-                .unwrap_or_else(|_| json!("[error]"));
+#### 3.4: Reactive Updates (Partial) ⚠️
 
-            let text = value_to_string(&result);
-            Box::new(Label::new(text))
-        }
-        Node::Paragraph { children } => {
-            let text = render_children_with_context(children, ctx);
-            Box::new(Label::new(text))
-        }
-        // ... other nodes updated to use context
-    }
-}
+**Completed:**
+- ✅ Expression value hashing (hash_json_value)
+- ✅ WidgetState tracks expr_value_hash
+- ✅ Reconciliation computes hashes for new states
+- ✅ State updates trigger file reload
 
-fn value_to_string(value: &Value) -> String {
-    match value {
-        Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Null => String::new(),
-        Value::Array(_) | Value::Object(_) => serde_json::to_string_pretty(value).unwrap(),
-    }
-}
-```
+**Known Issues:**
+- Reconciliation currently rebuilds ALL nodes containing expressions
+- Uses `node_contains_expr` check - conservative but inefficient
+- Expression hashes are computed but comparison is too broad
 
-**Tasks**:
-- [ ] Update widget builders to accept RenderContext
-- [ ] Evaluate Expr nodes
-- [ ] Evaluate expressions in text nodes: `Hello {user.name}`
-- [ ] Handle eval errors gracefully
+**Why it's hacky:**
+- Should compare expr hashes recursively in children
+- Should only rebuild if expression VALUES changed
+- Currently rebuilds on every state change regardless of value
+- Works but not optimal for performance
 
-**Test**:
-- [ ] Render `{user.name}` with context `{"user": {"name": "Alice"}}` → "Alice"
-- [ ] Render `Count: {state.count}` → "Count: 0"
+**To fix later:**
+- Deep expression hash comparison in children
+- Or flatten expressions to top-level widgets
+- Or store aggregated hash in parent nodes
 
 ---
 
@@ -1655,7 +1547,7 @@ thiserror = "2.0"
 ### Phase 1-3 Complete When:
 - [x] Can parse `apps/hello.hnmd` to AST ✅
 - [x] Can render static markdown + components ✅
-- [ ] Can evaluate expressions: `{user.name}` (not started - Phase 3)
+- [x] Can evaluate expressions: `{state.count}` ✅ (works, needs optimization)
 
 ### Phase 4-6 Complete When:
 - [ ] Can load Nostr events into queries (not started)
@@ -1681,21 +1573,23 @@ thiserror = "2.0"
 
 ## Next Steps
 
-**✅ COMPLETED: Phase 0, Phase 1 (all 5 sub-phases), Phase 2 (all 3 sub-phases)**
+**✅ COMPLETED: Phases 0-3**
 
-The parser and static renderer are fully working! The project can:
+The parser, static renderer, and expression evaluator are working! The project can:
 - Parse .hnmd files (frontmatter + markdown + JSX components) into AST
 - Render static content to Masonry widgets
+- **Evaluate expressions** - `{state.count}` renders actual values from state
+- **React to state changes** - editing state in frontmatter triggers UI updates
 - Display layouts (vstack, hstack), markdown (headings, paragraphs, lists, bold, italic, links, images)
 - Display interactive components (buttons, inputs) - though they don't have actions yet
-- 71/73 tests passing
+- 79/79 tests passing
 
-**Current Status:** Ready to begin Phase 3 (Expression Evaluation with jaq)
+**Current Status:** Phase 3 complete (basic implementation)
 
-**Next Phase:** Start with **Phase 3.1: jaq Integration**
-1. Add `jaq-interpret` and `jaq-parse` dependencies to Cargo.toml
-2. Create `src/runtime/` module structure
-3. Implement JaqEvaluator wrapper with caching
-4. Build RuntimeContext for expression evaluation
+**Technical Debt:**
+- Reconciliation is conservative: rebuilds all nodes containing expressions on state change
+- Should optimize to only rebuild when expression *values* change
+- Expression hashes are computed but not used for fine-grained comparison
 
-This will enable dynamic content like `{user.name}` and `{queries.feed[0].content}` to work.
+**Next Phase:** Phase 4 - Nostr Filters
+Will need real data flowing through queries to properly test optimized reconciliation.

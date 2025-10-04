@@ -7,6 +7,9 @@
 /// - Only rebuilds changed subtrees
 
 use crate::parser::ast::Node;
+use crate::renderer::RenderContext;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 /// Track widget state for reconciliation using generational indices
 #[derive(Clone)]
@@ -16,11 +19,27 @@ pub struct WidgetState {
 
     /// Generation number (increments when this slot is reused)
     pub generation: u32,
+
+    /// Hash of evaluated expression value (for Expr nodes)
+    /// This allows detecting when expression output changes even if expression itself doesn't
+    pub expr_value_hash: Option<u64>,
 }
 
 impl WidgetState {
     pub fn new(node: Node, generation: u32) -> Self {
-        Self { node, generation }
+        Self {
+            node,
+            generation,
+            expr_value_hash: None,
+        }
+    }
+
+    pub fn new_with_expr_hash(node: Node, generation: u32, expr_value_hash: Option<u64>) -> Self {
+        Self {
+            node,
+            generation,
+            expr_value_hash,
+        }
     }
 }
 
@@ -60,11 +79,12 @@ pub enum ReconcileOp {
     Remove,
 }
 
-/// Reconcile using Xilem-style generational arena (pure positional)
+/// Reconcile using Xilem-style generational arena with expression value tracking
 /// Returns new arena and operations to apply
 pub fn reconcile_arena(
     arena: &WidgetArena,
     new_nodes: &[Node],
+    ctx: &mut Option<RenderContext>,
 ) -> (WidgetArena, Vec<ReconcileOp>) {
     let mut new_states = Vec::new();
     let mut ops = Vec::new();
@@ -81,19 +101,28 @@ pub fn reconcile_arena(
 
         if let Some(old_state) = old_state {
             // There was a widget at this position before
-            if nodes_equal(&old_state.node, new_node) {
+            // Create new state with expr hash computed
+            let new_state = build_state_with_expr_hash(new_node, ctx, old_state.generation);
+
+            if nodes_equal_with_state(old_state, &new_state) {
                 // Same node - keep it
                 new_states.push(old_state.clone());
                 ops.push(ReconcileOp::Keep);
             } else {
                 // Different node - increment generation and rebuild
+                if matches!(new_node, Node::Expr { .. }) {
+                    println!("  🔄 Expr changed: old_hash={:?}, new_hash={:?}",
+                        old_state.expr_value_hash, new_state.expr_value_hash);
+                }
                 generations[idx] += 1;
-                new_states.push(WidgetState::new(new_node.clone(), generations[idx]));
+                let rebuild_state = build_state_with_expr_hash(new_node, ctx, generations[idx]);
+                new_states.push(rebuild_state);
                 ops.push(ReconcileOp::Rebuild);
             }
         } else {
             // New position (list grew)
-            new_states.push(WidgetState::new(new_node.clone(), generations[idx]));
+            let new_state = build_state_with_expr_hash(new_node, ctx, generations[idx]);
+            new_states.push(new_state);
             ops.push(ReconcileOp::Add);
         }
     }
@@ -106,26 +135,80 @@ pub fn reconcile_arena(
     (new_arena, ops)
 }
 
-/// Legacy reconcile for compatibility
-pub fn reconcile_nodes(
-    old: &[WidgetState],
-    new_nodes: &[Node],
-    _parent_path: &str,
-) -> (Vec<WidgetState>, Vec<ReconcileOp>) {
-    let arena = WidgetArena {
-        states: old.to_vec(),
-        generations: vec![0; old.len().max(new_nodes.len())],
-    };
-    let (new_arena, ops) = reconcile_arena(&arena, new_nodes);
-    (new_arena.states, ops)
-}
-
-/// Build a fresh widget tree from nodes and return the states
-pub fn build_widget_tree(nodes: &[Node], _parent_path: &str) -> Vec<WidgetState> {
+/// Build widget tree with expression value hashing for reactive updates
+pub fn build_widget_tree(
+    nodes: &[Node],
+    ctx: &mut Option<RenderContext>,
+) -> Vec<WidgetState> {
     nodes
         .iter()
-        .map(|node| WidgetState::new(node.clone(), 0))
+        .map(|node| build_state_with_expr_hash(node, ctx, 0))
         .collect()
+}
+
+/// Recursively build widget state with expr_value_hash computed
+fn build_state_with_expr_hash(
+    node: &Node,
+    ctx: &mut Option<RenderContext>,
+    generation: u32,
+) -> WidgetState {
+    let expr_hash = if let Node::Expr { expression } = node {
+        // Evaluate expression and hash the result
+        if let Some(context) = ctx {
+            match context.eval(expression) {
+                Ok(value) => Some(hash_json_value(&value)),
+                Err(_) => None,
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    WidgetState::new_with_expr_hash(node.clone(), generation, expr_hash)
+}
+
+/// Check if two widget states are equal (considers expr_value_hash for Expr nodes)
+fn nodes_equal_with_state(a: &WidgetState, b: &WidgetState) -> bool {
+    // For Expr nodes, compare the evaluated value hash
+    if matches!(a.node, Node::Expr { .. }) && matches!(b.node, Node::Expr { .. }) {
+        return a.expr_value_hash == b.expr_value_hash;
+    }
+
+    // For nodes with children, we need to check if any contain Expr nodes that might have changed
+    // For now, we'll rebuild any node that contains expressions to be safe
+    if node_contains_expr(&a.node) || node_contains_expr(&b.node) {
+        // If either node contains expressions, we need to rebuild to re-evaluate them
+        // This is conservative but correct - we'll optimize later
+        return false;
+    }
+
+    // For all other nodes, use structural equality
+    nodes_equal(&a.node, &b.node)
+}
+
+/// Check if a node or its children contain any Expr nodes
+fn node_contains_expr(node: &Node) -> bool {
+    match node {
+        Node::Expr { .. } => true,
+        Node::Heading { children, .. } => children.iter().any(node_contains_expr),
+        Node::Paragraph { children } => children.iter().any(node_contains_expr),
+        Node::Strong { children } => children.iter().any(node_contains_expr),
+        Node::Emphasis { children } => children.iter().any(node_contains_expr),
+        Node::Link { children, .. } => children.iter().any(node_contains_expr),
+        Node::List { items, .. } => items.iter().any(|item| item.children.iter().any(node_contains_expr)),
+        Node::VStack { children, .. } => children.iter().any(node_contains_expr),
+        Node::HStack { children, .. } => children.iter().any(node_contains_expr),
+        Node::Grid { children, .. } => children.iter().any(node_contains_expr),
+        Node::Each { children, .. } => children.iter().any(node_contains_expr),
+        Node::If { children, else_children, .. } => {
+            children.iter().any(node_contains_expr) ||
+            else_children.as_ref().map(|ec| ec.iter().any(node_contains_expr)).unwrap_or(false)
+        }
+        Node::Button { children, .. } => children.iter().any(node_contains_expr),
+        _ => false,
+    }
 }
 
 /// Check if two AST nodes are semantically equal
@@ -201,6 +284,14 @@ fn children_equal(a: &[Node], b: &[Node]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(a, b)| nodes_equal(a, b))
 }
 
+/// Compute hash of a JSON value for expression comparison
+fn hash_json_value(value: &serde_json::Value) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    // Hash the JSON string representation (stable across runs)
+    value.to_string().hash(&mut hasher);
+    hasher.finish()
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -217,7 +308,7 @@ mod tests {
 
         // Change second node
         let new_nodes = vec![Node::text("A"), Node::text("C")];
-        let (new_arena, ops) = reconcile_arena(&arena, &new_nodes);
+        let (new_arena, ops) = reconcile_arena(&arena, &new_nodes, &mut None);
 
         assert_eq!(ops.len(), 2);
         assert!(matches!(ops[0], ReconcileOp::Keep));
@@ -252,7 +343,7 @@ mod tests {
 
         // Insert a new node at position 1
         let new_nodes = vec![Node::text("A"), Node::text("NEW"), Node::text("B"), Node::text("C")];
-        let (new_arena, ops) = reconcile_arena(&arena, &new_nodes);
+        let (new_arena, ops) = reconcile_arena(&arena, &new_nodes, &mut None);
 
         assert_eq!(ops.len(), 4);
         // Position 0: "A" → "A" = Keep

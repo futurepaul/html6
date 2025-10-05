@@ -1,7 +1,7 @@
 // On Windows platform, don't show a console when opening the app.
 #![windows_subsystem = "windows"]
 
-use html6::{loader, reconciler, renderer, runtime::RuntimeContext};
+use html6::{loader, reconciler, renderer, runtime::RuntimeContext, runtime::query::QueryRuntime};
 use masonry::core::{ErasedAction, WidgetId, WidgetTag};
 use masonry::dpi::LogicalSize;
 use masonry::peniko::color::AlphaColor;
@@ -9,10 +9,10 @@ use masonry::peniko::Color;
 use masonry::properties::{Background, BorderColor, BorderWidth, ContentColor, DisabledContentColor, CaretColor, SelectionColor};
 use masonry::theme;
 use masonry::widgets::{Button, Flex, Label, Portal, TextArea};
-use masonry_winit::app::{AppDriver, DriverCtx, EventLoopProxy, MasonryUserEvent, NewWindow, WindowId};
+use masonry_winit::app::{AppDriver, DriverCtx, MasonryUserEvent, NewWindow, WindowId};
 use masonry_winit::winit::window::Window;
 use notify::{Watcher, RecursiveMode, Event};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::path::Path;
 
 const CONTENT_TAG: WidgetTag<Flex> = WidgetTag::new("content");
@@ -22,6 +22,7 @@ struct Driver {
     hnmd_path: String,
     widget_states: Vec<reconciler::WidgetState>,
     render_ctx: Option<renderer::RenderContext>,
+    query_runtime: Option<Arc<QueryRuntime>>,
 }
 
 // Custom action to trigger reload
@@ -48,7 +49,27 @@ impl AppDriver for Driver {
                     print_ast(&doc);
 
                     // Create runtime context from frontmatter state
-                    let runtime_ctx = RuntimeContext::with_state(doc.frontmatter.state.clone());
+                    let mut runtime_ctx = RuntimeContext::with_state(doc.frontmatter.state.clone());
+
+                    // Update with latest query data if available
+                    if let Some(qr) = &self.query_runtime {
+                        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+                        let queries_json = rt.block_on(async {
+                            qr.to_json().await
+                        });
+
+                        // Debug: Show what we're loading
+                        if let Some(obj) = queries_json.as_object() {
+                            for (key, value) in obj {
+                                if let Some(arr) = value.as_array() {
+                                    println!("  📊 Reloading with {}: {} events", key, arr.len());
+                                }
+                            }
+                        }
+
+                        runtime_ctx.queries = queries_json;
+                    }
+
                     let render_ctx = renderer::RenderContext::new(runtime_ctx);
 
                     // Debug: print state changes
@@ -191,7 +212,52 @@ fn main() {
 
     // Create runtime context from frontmatter state
     let runtime_ctx = RuntimeContext::with_state(doc.frontmatter.state.clone());
-    let render_ctx = renderer::RenderContext::new(runtime_ctx);
+
+    // Initialize QueryRuntime if there are filters
+    let query_runtime = if !doc.frontmatter.filters.is_empty() {
+        println!("🔌 Initializing Nostr client...");
+
+        // Create tokio runtime for async operations
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+
+        let query_runtime = rt.block_on(async {
+            // Create QueryRuntime
+            let mut qr = QueryRuntime::new().await.expect("Failed to create QueryRuntime");
+
+            // Add relay
+            qr.add_relay("wss://relay.damus.io").await.expect("Failed to add relay");
+            println!("  ✓ Connected to wss://relay.damus.io");
+
+            // Subscribe to all filters in frontmatter
+            for (id, filter_def) in &doc.frontmatter.filters {
+                println!("  📡 Subscribing to filter '{}'...", id);
+                let _ = qr.subscribe_ast_filter(id, filter_def, &runtime_ctx).await
+                    .expect(&format!("Failed to subscribe to filter '{}'", id));
+            }
+
+            Arc::new(qr)
+        });
+
+        // Spawn tokio runtime in background thread to keep it alive
+        std::thread::spawn(move || {
+            rt.block_on(async {
+                // Keep runtime alive
+                loop {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                }
+            });
+        });
+
+        Some(query_runtime)
+    } else {
+        None
+    };
+
+    // Start with empty query results - they'll be populated as events arrive
+    let runtime_ctx_with_queries = runtime_ctx.clone();
+    println!("  ⚡ Starting UI with empty queries (will update as events arrive)...");
+
+    let render_ctx = renderer::RenderContext::new(runtime_ctx_with_queries);
 
     // Build initial widget states for reconciliation with context
     let mut initial_ctx = Some(render_ctx.clone());
@@ -210,11 +276,15 @@ fn main() {
         .with_resizable(true)
         .with_min_inner_size(window_size);
 
+    // Clone query_runtime for the background thread before moving it to Driver
+    let query_runtime_for_bg = query_runtime.clone();
+
     let driver = Driver {
         window_id: WindowId::next(),
         hnmd_path: hnmd_file.to_string(),
         widget_states: initial_states,
         render_ctx: Some(render_ctx),
+        query_runtime,
     };
 
     // Create custom theme with black text on light gray background
@@ -261,6 +331,7 @@ fn main() {
 
     // Spawn thread to watch for file changes and send reload actions
     let window_id = driver.window_id;
+    let proxy_clone = proxy.clone();
     std::thread::spawn(move || {
         // Keep watcher alive
         let _watcher = watcher;
@@ -273,10 +344,47 @@ fn main() {
                 let action: masonry::core::ErasedAction = Box::new(ReloadAction);
                 let widget_id = WidgetId::next();
                 let user_event = MasonryUserEvent::Action(window_id, action, widget_id);
-                let _ = proxy.send_event(user_event);
+                let _ = proxy_clone.send_event(user_event);
             }
         }
     });
+
+    // Spawn thread to watch for query updates and trigger UI refreshes
+    if let Some(qr) = query_runtime_for_bg.as_ref() {
+        let qr_clone = Arc::clone(qr);
+        let window_id = driver.window_id;
+
+        std::thread::spawn(move || {
+            // Poll for query updates every 500ms
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+
+                // Check if we have any queries with events
+                let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+                let has_events = rt.block_on(async {
+                    let queries_json = qr_clone.to_json().await;
+                    if let Some(obj) = queries_json.as_object() {
+                        obj.values().any(|v| v.as_array().map(|a| !a.is_empty()).unwrap_or(false))
+                    } else {
+                        false
+                    }
+                });
+
+                if has_events {
+                    println!("  🔄 Query updated, refreshing UI...");
+
+                    // Send reload action to update UI
+                    let action: masonry::core::ErasedAction = Box::new(ReloadAction);
+                    let widget_id = WidgetId::next();
+                    let user_event = MasonryUserEvent::Action(window_id, action, widget_id);
+                    let _ = proxy.send_event(user_event);
+
+                    // Only refresh once when events first arrive
+                    break;
+                }
+            }
+        });
+    }
 
     // Run app
     masonry_winit::app::run_with(

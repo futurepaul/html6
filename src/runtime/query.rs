@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 
-use crate::runtime::NostrClient;
+use crate::runtime::{NostrClient, RuntimeContext};
+use crate::parser::ast;
+use crate::runtime::filters::compile_filter;
+use crate::runtime::jaq::JaqEvaluator;
 
 /// Query runtime for managing Nostr subscriptions and event streams
 pub struct QueryRuntime {
@@ -17,13 +20,36 @@ pub struct QueryRuntime {
 }
 
 impl QueryRuntime {
-    /// Create a new QueryRuntime with the given Nostr client
-    pub fn new(client: NostrClient) -> Self {
-        Self {
+    /// Create a new QueryRuntime with a new Nostr client
+    pub async fn new() -> Result<Self> {
+        let client = NostrClient::new(vec![]).await?;
+        Ok(Self {
             client: Arc::new(client),
             queries: Arc::new(RwLock::new(HashMap::new())),
             broadcasters: HashMap::new(),
-        }
+        })
+    }
+
+    /// Add a relay to the client
+    pub async fn add_relay(&self, url: &str) -> Result<()> {
+        self.client.client().add_relay(url).await?;
+        self.client.client().connect().await;
+        Ok(())
+    }
+
+    /// Subscribe to an AST filter (compiles it first)
+    pub async fn subscribe_ast_filter(
+        &mut self,
+        id: &str,
+        ast_filter: &ast::Filter,
+        ctx: &RuntimeContext,
+    ) -> Result<broadcast::Receiver<Vec<Event>>> {
+        // Compile the AST filter
+        let mut evaluator = JaqEvaluator::new();
+        let filter = compile_filter(ast_filter, ctx, &mut evaluator)?;
+
+        // Subscribe to the compiled filter
+        self.subscribe_filter(id.to_string(), filter).await
     }
 
     /// Subscribe to a filter and start collecting events
@@ -35,8 +61,9 @@ impl QueryRuntime {
         // Create broadcast channel for this query
         let (tx, rx) = broadcast::channel(100);
 
-        // Subscribe to the filter
-        let _output = self.client.subscribe(filter.clone()).await?;
+        // Subscribe to the filter and get subscription ID
+        let output = self.client.subscribe(filter.clone()).await?;
+        let sub_id = output.val;
 
         // Clone references for the background task
         let client = Arc::clone(&self.client);
@@ -44,27 +71,62 @@ impl QueryRuntime {
         let query_id = id.clone();
         let tx_clone = tx.clone();
 
-        // Spawn background task to listen for events
+        // Spawn background task to listen for events from the subscription
         tokio::spawn(async move {
-            // Initial query to get existing events
-            if let Ok(events) = client.get_events(filter.clone()).await {
-                // Sort by created_at (newest first)
-                let mut sorted_events = events;
-                sorted_events.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            println!("  👂 Listening for events on subscription '{}'...", query_id);
 
-                // Store in queries map
-                {
-                    let mut queries_lock = queries.write().await;
-                    queries_lock.insert(query_id.clone(), sorted_events.clone());
+            // Handle notifications for this subscription
+            let mut notifications = client.client().notifications();
+
+            let mut collected_events = Vec::new();
+            let mut last_update = std::time::Instant::now();
+
+            while let Ok(notification) = notifications.recv().await {
+                use nostr_sdk::RelayPoolNotification;
+
+                match notification {
+                    RelayPoolNotification::Event { subscription_id, event, .. } => {
+                        // Only handle events for our subscription
+                        if subscription_id == sub_id {
+                            collected_events.push(*event);
+
+                            // Update every 500ms or when we hit the limit
+                            if last_update.elapsed().as_millis() > 500 || collected_events.len() >= filter.limit.unwrap_or(100) as usize {
+                                println!("  📥 Received {} events for query '{}'", collected_events.len(), query_id);
+
+                                // Sort by created_at (newest first)
+                                collected_events.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+                                // Apply limit
+                                if let Some(limit) = filter.limit {
+                                    collected_events.truncate(limit as usize);
+                                }
+
+                                // Store in queries map
+                                {
+                                    let mut queries_lock = queries.write().await;
+                                    queries_lock.insert(query_id.clone(), collected_events.clone());
+                                    println!("  ✓ Stored {} events in queries map", collected_events.len());
+                                }
+
+                                // Broadcast updated events
+                                let _ = tx_clone.send(collected_events.clone());
+
+                                last_update = std::time::Instant::now();
+
+                                // If we've hit the limit, we can stop
+                                if collected_events.len() >= filter.limit.unwrap_or(100) as usize {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    RelayPoolNotification::Message { .. } => {
+                        // Ignore other messages
+                    }
+                    _ => {}
                 }
-
-                // Broadcast initial events
-                let _ = tx_clone.send(sorted_events);
             }
-
-            // TODO: In a full implementation, we would listen to the subscription
-            // for new events in real-time and update the queries map + broadcast
-            // For now, we just have the initial snapshot
         });
 
         // Store broadcaster
@@ -126,18 +188,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_runtime_creation() {
-        let relays = vec!["wss://relay.damus.io".to_string()];
-        let client = NostrClient::new(relays).await.unwrap();
-        let runtime = QueryRuntime::new(client);
-
+        let runtime = QueryRuntime::new().await.unwrap();
         assert!(runtime.queries.read().await.is_empty());
     }
 
     #[tokio::test]
     async fn test_subscribe_filter() {
-        let relays = vec!["wss://relay.damus.io".to_string()];
-        let client = NostrClient::new(relays).await.unwrap();
-        let mut runtime = QueryRuntime::new(client);
+        let mut runtime = QueryRuntime::new().await.unwrap();
+
+        // Add a relay
+        runtime.add_relay("wss://relay.damus.io").await.unwrap();
 
         // Create a basic filter
         let filter = Filter::new().kind(Kind::from(1)).limit(10);

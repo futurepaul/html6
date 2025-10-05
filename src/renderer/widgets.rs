@@ -398,6 +398,34 @@ pub fn build_widget_with_context(
             wrap_in_flex(NewWidget::new_with_props(input, input_props))
         }
 
+        // JSON debug viewer - renders JSON with pretty formatting
+        Node::Json { value } => {
+            let text = if let Some(mut ctx) = ctx.clone() {
+                // Try to evaluate the expression and pretty-print JSON
+                match ctx.eval(value) {
+                    Ok(json_value) => {
+                        // Pretty print the JSON
+                        serde_json::to_string_pretty(&json_value)
+                            .unwrap_or_else(|_| format!("{{{}}} [json error]", value))
+                    }
+                    Err(_) => format!("{{{}}} [eval error]", value),
+                }
+            } else {
+                // No context, show placeholder
+                format!("<json value={{{}}} />", value)
+            };
+
+            // Use a monospace-style label for JSON display
+            let json_props = Properties::new()
+                .with(Background::Color(Color::from_rgb8(245, 245, 245)))
+                .with(Padding::from_vh(12., 12.))
+                .with(BorderColor { color: Color::from_rgb8(200, 200, 200) })
+                .with(BorderWidth { width: 1.0 })
+                .with(CornerRadius { radius: 4.0 });
+
+            wrap_in_flex(NewWidget::new_with_props(Label::new(text), json_props))
+        }
+
         // Expression evaluation - render the evaluated value or placeholder
         Node::Expr { expression } => {
             let text = if let Some(mut ctx) = ctx.clone() {

@@ -322,6 +322,11 @@ fn build_component_from_jsx(
             Node::Spacer { size }
         }
 
+        "json" => {
+            let value = get_attr_expr(&attrs, "value")?;
+            Node::Json { value }
+        }
+
         _ => {
             return Err(anyhow::anyhow!("Unknown component: <{}>", tag));
         }

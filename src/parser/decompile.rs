@@ -285,6 +285,9 @@ fn decompile_node(node: &Node, indent: usize) -> String {
             output.push_str("</grid>\n\n");
             output
         }
+        Node::Json { value } => {
+            format!("<json value={{{}}} />\n\n", value)
+        }
         Node::Spacer { size } => {
             if let Some(s) = size {
                 format!("<spacer size={{{}}} />\n\n", s)

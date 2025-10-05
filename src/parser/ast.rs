@@ -296,6 +296,11 @@ pub enum Node {
         columns: Option<usize>,
         children: Vec<Node>,
     },
+    /// JSON debug viewer
+    Json {
+        /// Expression that evaluates to any value
+        value: String,
+    },
     /// Spacer for layout
     Spacer {
         /// Size in pixels

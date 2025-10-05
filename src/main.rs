@@ -166,6 +166,7 @@ fn node_type(node: &html6::parser::ast::Node) -> String {
         Node::VStack { children, .. } => format!("VStack({} children)", children.len()),
         Node::HStack { children, .. } => format!("HStack({} children)", children.len()),
         Node::Grid { .. } => "Grid".to_string(),
+        Node::Json { value } => format!("Json({})", value),
         Node::Spacer { .. } => "Spacer".to_string(),
     }
 }

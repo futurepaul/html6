@@ -2,6 +2,8 @@
 
 A native renderer for Hypernote. Uses the [Masonry](https://github.com/linebender/xilem) widget toolkit to render the UI. But I'm a zig fanboy so I'm rewriting it in zig: [zello](https://github.com/futurepaul/zello)
 
+<img width="912" height="940" alt="Screenshot 2026-01-15 at 10 27 19 AM" src="https://github.com/user-attachments/assets/0deb60b0-124b-4eb0-8674-58bcd27f8f26" />
+
 ## Usage
 
 There are Hypernote apps in the `apps` directory. You can run them with:
@@ -10,7 +12,7 @@ There are Hypernote apps in the `apps` directory. You can run them with:
 cargo run -- apps/hello.hnmd
 ```
 
-`hello.hnmd` looks is defined like this:
+`hello.hnmd` is defined like this:
 
 ```md
 ---

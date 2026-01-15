@@ -68,6 +68,7 @@ impl WidgetArena {
 }
 
 /// Result of reconciliation with rebuild instructions
+#[derive(Debug, Clone, Copy)]
 pub enum ReconcileOp {
     /// Keep existing widget at this index (no rebuild needed)
     Keep,

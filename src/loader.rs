@@ -1,13 +1,29 @@
 use crate::parser::{frontmatter, mdx};
+use crate::runtime::ComponentRegistry;
 use anyhow::{Context, Result};
 use std::fs;
+use std::path::Path;
 
-/// Load and parse a .hnmd file
-pub fn load_hnmd(path: &str) -> Result<crate::parser::ast::Document> {
+/// Load and parse a .hnmd file, returning both document and component registry
+pub fn load_hnmd(path: &str) -> Result<(crate::parser::ast::Document, ComponentRegistry)> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read file: {}", path))?;
 
-    parse_hnmd(&content)
+    let doc = parse_hnmd(&content)?;
+
+    // Create component registry with base path from document location
+    let base_path = Path::new(path)
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    let mut registry = ComponentRegistry::new(base_path);
+
+    // Load all imported components
+    for (name, import_path) in &doc.imports {
+        registry.load_component(name, import_path)
+            .map_err(|e| anyhow::anyhow!("Failed to load component '{}' from '{}': {}", name, import_path, e))?;
+    }
+
+    Ok((doc, registry))
 }
 
 /// Parse HNMD content (frontmatter + markdown)
@@ -37,10 +53,20 @@ pub fn parse_hnmd(content: &str) -> Result<crate::parser::ast::Document> {
         frontmatter::parse_frontmatter(frontmatter_str)?
     };
 
+    // Parse imports from frontmatter
+    let imports = if frontmatter_str.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        frontmatter::parse_imports(frontmatter_str)?
+    };
+
     // Parse markdown body with MDX
     let body = mdx::parse_body(body_str)?;
 
-    Ok(crate::parser::ast::Document::new(frontmatter, body))
+    let mut doc = crate::parser::ast::Document::new(frontmatter, body);
+    doc.imports = imports;
+
+    Ok(doc)
 }
 
 #[cfg(test)]
@@ -81,16 +107,38 @@ Content here"#;
 
     #[test]
     fn test_load_hello_hnmd() {
-        let doc = load_hnmd("apps/hello.hnmd").unwrap();
+        let (doc, registry) = load_hnmd("apps/hello.hnmd").unwrap();
 
         // Should have parsed the markdown
         assert!(doc.body.len() > 0);
+
+        // Should have no components
+        assert_eq!(registry.list_components().len(), 0);
 
         // Debug: print the parsed structure
         println!("Parsed document body:");
         for (i, node) in doc.body.iter().enumerate() {
             println!("{}: {:?}", i, node);
         }
+    }
+
+    #[test]
+    fn test_load_component_imports() {
+        let (doc, registry) = load_hnmd("apps/test_component.hnmd").unwrap();
+
+        // Should have loaded Profile component
+        assert_eq!(registry.list_components().len(), 1);
+        assert!(registry.contains("Profile"));
+
+        // Document should have import
+        assert!(doc.imports.contains_key("Profile"));
+
+        // Should have CustomComponent node in body
+        let has_custom = doc.body.iter().any(|n| matches!(n, Node::CustomComponent { .. }));
+        assert!(has_custom, "Document should contain CustomComponent node");
+
+        println!("✅ Component loading test passed!");
+        println!("   Loaded components: {:?}", registry.list_components());
     }
 
     #[test]

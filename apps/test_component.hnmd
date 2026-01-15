@@ -1,0 +1,10 @@
+---
+imports:
+  Profile: "./components/Profile.hnmc"
+---
+
+# Component Test
+
+<Profile pubkey="test123" />
+
+Done!

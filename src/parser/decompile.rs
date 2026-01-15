@@ -1,4 +1,4 @@
-use crate::parser::ast::{Action, Document, Filter, Frontmatter, ListItem, Node, Pipe};
+use crate::parser::ast::{Action, Document, Filter, Frontmatter, ListItem, Node, Pipe, PropValue};
 
 /// Decompile a Document AST back to .hnmd format
 pub fn decompile(doc: &Document) -> String {
@@ -294,6 +294,44 @@ fn decompile_node(node: &Node, indent: usize) -> String {
             } else {
                 "<spacer />\n\n".to_string()
             }
+        }
+        Node::CustomComponent { name, props, children } => {
+            let mut output = String::new();
+            output.push('<');
+            output.push_str(name);
+
+            // Render props
+            for (key, value) in props {
+                output.push(' ');
+                output.push_str(key);
+                output.push('=');
+                match value {
+                    PropValue::Literal(s) => {
+                        output.push('"');
+                        output.push_str(s);
+                        output.push('"');
+                    }
+                    PropValue::Expression(expr) => {
+                        output.push('{');
+                        output.push_str(expr);
+                        output.push('}');
+                    }
+                }
+            }
+
+            if children.is_empty() {
+                output.push_str(" />\n\n");
+            } else {
+                output.push_str(">\n");
+                for child in children {
+                    output.push_str(&decompile_node(child, indent + 2));
+                }
+                output.push_str("</");
+                output.push_str(name);
+                output.push_str(">\n\n");
+            }
+
+            output
         }
     }
 }

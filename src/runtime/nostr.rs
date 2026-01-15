@@ -62,6 +62,60 @@ impl NostrClient {
         let events = self.client.database().query(filter).await?;
         Ok(events.into_iter().collect())
     }
+
+    /// Fetch events once (one-time subscription: subscribe, wait for EOSE, unsubscribe)
+    /// This is for loading specific events/profiles without keeping a long-lived subscription
+    pub async fn fetch_events(
+        &self,
+        filter: Filter,
+        timeout_secs: Option<u64>,
+    ) -> Result<Vec<Event>> {
+        // Subscribe
+        let output = self.subscribe(filter).await?;
+        let sub_id = output.val;
+
+        // Get notifications channel
+        let mut notifications = self.client.notifications();
+
+        // Collect events until EOSE
+        let mut events = Vec::new();
+        let timeout_duration = std::time::Duration::from_secs(timeout_secs.unwrap_or(5));
+        let timeout = tokio::time::sleep(timeout_duration);
+        tokio::pin!(timeout);
+
+        loop {
+            tokio::select! {
+                Ok(notification) = notifications.recv() => {
+                    match notification {
+                        RelayPoolNotification::Event { subscription_id, event, .. } => {
+                            if subscription_id == sub_id {
+                                events.push(*event);
+                            }
+                        }
+                        RelayPoolNotification::Message { message, .. } => {
+                            // Check for EOSE
+                            if let RelayMessage::EndOfStoredEvents(id) = message {
+                                if id.as_ref() == &sub_id {
+                                    // Got EOSE, we're done
+                                    break;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ = &mut timeout => {
+                    // Timeout reached
+                    break;
+                }
+            }
+        }
+
+        // Unsubscribe
+        self.client.unsubscribe(&sub_id).await;
+
+        Ok(events)
+    }
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 use crate::parser::ast::Node;
 use crate::renderer::vendored::{TextInput, FocusedBorderColor, Hr, HrColor};
-use crate::runtime::{JaqEvaluator, RuntimeContext};
+use crate::runtime::{ComponentRegistry, JaqEvaluator, RuntimeContext};
 use masonry::core::{NewWidget, Properties, StyleProperty};
 use masonry::parley::style::{FontStyle, FontWeight};
 use masonry::peniko::Color;
@@ -8,7 +8,7 @@ use masonry::peniko::color::AlphaColor;
 use masonry::properties::{Background, BorderColor, BorderWidth, CornerRadius, ObjectFit, Padding, CaretColor, SelectionColor, UnfocusedSelectionColor};
 use masonry::properties::types::{CrossAxisAlignment, Length, MainAxisAlignment};
 use masonry::widgets::{Button, Flex, Image, Label};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::fs;
 
 /// Debug flag to show borders around layout containers
@@ -19,6 +19,7 @@ const DEBUG_LAYOUT: bool = false;
 pub struct RenderContext {
     pub runtime_ctx: RuntimeContext,
     pub evaluator: JaqEvaluator,
+    pub registry: Option<ComponentRegistry>,
 }
 
 impl RenderContext {
@@ -26,7 +27,13 @@ impl RenderContext {
         Self {
             runtime_ctx,
             evaluator: JaqEvaluator::new(),
+            registry: None,
         }
+    }
+
+    pub fn with_registry(mut self, registry: ComponentRegistry) -> Self {
+        self.registry = Some(registry);
+        self
     }
 
     /// Evaluate an expression using this context
@@ -441,11 +448,53 @@ pub fn build_widget_with_context(
             wrap_in_flex(NewWidget::new(Label::new(text)))
         }
 
-        Node::Each { from, as_name, .. } => {
-            wrap_in_flex(NewWidget::new(Label::new(format!(
-                "[Each: {} as {}]",
-                from, as_name
-            ))))
+        Node::Each { from, as_name, children } => {
+            // If we have a context, evaluate the `from` expression to get an array
+            if let Some(mut render_ctx) = ctx_mut.clone() {
+                let items = match render_ctx.runtime_ctx.eval(from, &mut render_ctx.evaluator) {
+                    Ok(value) => {
+                        if let Value::Array(arr) = value {
+                            arr
+                        } else {
+                            // If it's not an array, treat it as a single-item array
+                            vec![value]
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Error evaluating each expression '{}': {}", from, e);
+                        vec![]
+                    }
+                };
+
+                // Build a vstack containing all the items
+                let mut flex = Flex::column();
+
+                for (index, item) in items.iter().enumerate() {
+                    // Create scoped context with item binding
+                    let scoped_runtime_ctx = render_ctx.runtime_ctx
+                        .with_local(as_name, item.clone())
+                        .with_local("itemIndex", json!(index));
+
+                    let scoped_ctx = RenderContext {
+                        runtime_ctx: scoped_runtime_ctx,
+                        evaluator: render_ctx.evaluator.clone(),
+                        registry: render_ctx.registry.clone(),
+                    };
+
+                    // Render children with scoped context
+                    for child in children {
+                        flex = flex.with_child(build_widget_with_context(child, Some(scoped_ctx.clone())));
+                    }
+                }
+
+                NewWidget::new(flex)
+            } else {
+                // No context available, show placeholder
+                wrap_in_flex(NewWidget::new(Label::new(format!(
+                    "[Each: {} as {} - no context]",
+                    from, as_name
+                ))))
+            }
         }
 
         Node::If { value, .. } => wrap_in_flex(NewWidget::new(Label::new(format!("[If: {}]", value)))),
@@ -467,7 +516,88 @@ pub fn build_widget_with_context(
                 .with(Padding::from_vh(8.0, 0.0));
             wrap_in_flex(NewWidget::new_with_props(hr, props))
         }
+
+        Node::CustomComponent { name, props, children } => {
+            render_custom_component(name, props, children, &ctx)
+        }
     }
+}
+
+/// Render a custom component by looking it up in the registry
+fn render_custom_component(
+    name: &str,
+    props: &std::collections::HashMap<String, crate::parser::ast::PropValue>,
+    _children: &[Node],
+    parent_ctx: &Option<RenderContext>,
+) -> NewWidget<Flex> {
+    // Get component registry from context
+    let ctx = match parent_ctx {
+        Some(c) => c,
+        None => {
+            return wrap_in_flex(NewWidget::new(
+                Label::new(format!("[Component: {} (no context)]", name))
+            ));
+        }
+    };
+
+    let registry = match &ctx.registry {
+        Some(r) => r,
+        None => {
+            return wrap_in_flex(NewWidget::new(
+                Label::new(format!("[Component: {} (no registry)]", name))
+            ));
+        }
+    };
+
+    // Look up component definition
+    let Some(component_def) = registry.get(name) else {
+        return wrap_in_flex(NewWidget::new(
+            Label::new(format!("[Component: {} not found]", name))
+                .with_style(StyleProperty::FontSize(14.0))
+        ));
+    };
+
+    // Evaluate props in parent context
+    let mut prop_values = std::collections::HashMap::new();
+    let mut parent_ctx_mut = parent_ctx.clone();
+    for (prop_name, prop_val) in props {
+        let value = match prop_val {
+            crate::parser::ast::PropValue::Literal(s) => json!(s),
+            crate::parser::ast::PropValue::Expression(expr) => {
+                // Evaluate expression in parent context
+                if let Some(ctx) = &mut parent_ctx_mut {
+                    ctx.eval(expr).unwrap_or_else(|e| {
+                        eprintln!("⚠️  Failed to evaluate prop '{}' expression '{}': {}", prop_name, expr, e);
+                        json!(format!("[eval error: {}]", e))
+                    })
+                } else {
+                    json!(expr) // No context, use literal
+                }
+            }
+        };
+        prop_values.insert(prop_name.clone(), value);
+    }
+
+    // Create component-scoped context with props
+    let mut component_runtime_ctx = RuntimeContext::new();
+    component_runtime_ctx.locals.insert("props".to_string(), json!(prop_values));
+
+    // Inherit queries from parent context (components share the same query results)
+    component_runtime_ctx.queries = ctx.runtime_ctx.queries.clone();
+
+    // Create render context for component
+    let mut component_ctx = RenderContext::new(component_runtime_ctx);
+    if let Some(ref reg) = ctx.registry {
+        component_ctx = component_ctx.with_registry(reg.clone());
+    }
+
+    // Render component body
+    let mut flex = Flex::column();
+    for node in &component_def.body {
+        flex = flex.with_child(build_widget_with_context(node, Some(component_ctx.clone())));
+    }
+
+    NewWidget::new(flex)
 }
 
 /// Render child nodes to text (for labels)
@@ -505,7 +635,10 @@ fn node_to_text_with_context(node: &Node, ctx: &mut Option<RenderContext>) -> St
             if let Some(context) = ctx {
                 match context.eval(expression) {
                     Ok(value) => value_to_string(&value),
-                    Err(_) => format!("{{{}}} [error]", expression),
+                    Err(e) => {
+                        eprintln!("⚠️  Failed to evaluate expression '{}': {}", expression, e);
+                        format!("{{{}}} [error]", expression)
+                    }
                 }
             } else {
                 format!("{{{}}}", expression)

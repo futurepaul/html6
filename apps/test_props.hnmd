@@ -1,0 +1,12 @@
+---
+state:
+  myValue: "It works!"
+---
+
+# Test Props
+
+Direct: {state.myValue}
+
+**Bold:** {state.myValue}
+
+`Code: {state.myValue}`

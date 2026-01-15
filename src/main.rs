@@ -1,7 +1,7 @@
 // On Windows platform, don't show a console when opening the app.
 #![windows_subsystem = "windows"]
 
-use html6::{loader, reconciler, renderer, runtime::RuntimeContext, runtime::query::QueryRuntime};
+use html6::{loader, reconciler, renderer, runtime::RuntimeContext, runtime::query::QueryRuntime, runtime::ComponentRegistry};
 use masonry::core::{ErasedAction, WidgetId, WidgetTag};
 use masonry::dpi::LogicalSize;
 use masonry::peniko::color::AlphaColor;
@@ -23,6 +23,7 @@ struct Driver {
     widget_states: Vec<reconciler::WidgetState>,
     render_ctx: Option<renderer::RenderContext>,
     query_runtime: Option<Arc<QueryRuntime>>,
+    registry: ComponentRegistry,
 }
 
 // Custom action to trigger reload
@@ -45,7 +46,7 @@ impl AppDriver for Driver {
 
             // Reload and parse file
             match loader::load_hnmd(&self.hnmd_path) {
-                Ok(doc) => {
+                Ok((doc, _registry)) => {
                     print_ast(&doc);
 
                     // Create runtime context from frontmatter state
@@ -70,7 +71,8 @@ impl AppDriver for Driver {
                         runtime_ctx.queries = queries_json;
                     }
 
-                    let render_ctx = renderer::RenderContext::new(runtime_ctx);
+                    let render_ctx = renderer::RenderContext::new(runtime_ctx)
+                        .with_registry(self.registry.clone());
 
                     // Debug: print state changes
                     println!("  🔍 New state: {:?}", doc.frontmatter.state);
@@ -189,6 +191,7 @@ fn node_type(node: &html6::parser::ast::Node) -> String {
         Node::Grid { .. } => "Grid".to_string(),
         Node::Json { value } => format!("Json({})", value),
         Node::Spacer { .. } => "Spacer".to_string(),
+        Node::CustomComponent { name, .. } => format!("CustomComponent({})", name),
     }
 }
 
@@ -204,7 +207,7 @@ fn main() {
     println!("📂 Loading: {}\n", hnmd_file);
 
     // Load and parse .hnmd file
-    let doc = loader::load_hnmd(hnmd_file)
+    let (doc, registry) = loader::load_hnmd(hnmd_file)
         .expect(&format!("Failed to load {}", hnmd_file));
 
     // Print AST on startup
@@ -257,7 +260,8 @@ fn main() {
     let runtime_ctx_with_queries = runtime_ctx.clone();
     println!("  ⚡ Starting UI with empty queries (will update as events arrive)...");
 
-    let render_ctx = renderer::RenderContext::new(runtime_ctx_with_queries);
+    let render_ctx = renderer::RenderContext::new(runtime_ctx_with_queries)
+        .with_registry(registry.clone());
 
     // Build initial widget states for reconciliation with context
     let mut initial_ctx = Some(render_ctx.clone());
@@ -285,6 +289,7 @@ fn main() {
         widget_states: initial_states,
         render_ctx: Some(render_ctx),
         query_runtime,
+        registry,
     };
 
     // Create custom theme with black text on light gray background

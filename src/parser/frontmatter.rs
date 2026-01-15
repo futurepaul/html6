@@ -4,6 +4,7 @@ use serde_yaml_ng::Value;
 use std::collections::HashMap;
 
 /// Parse YAML frontmatter into Frontmatter struct
+/// Returns (frontmatter, imports)
 pub fn parse_frontmatter(yaml: &str) -> Result<Frontmatter> {
     let value: Value = serde_yaml_ng::from_str(yaml)
         .context("Failed to parse YAML frontmatter")?;
@@ -18,6 +19,40 @@ pub fn parse_frontmatter(yaml: &str) -> Result<Frontmatter> {
         actions: parse_actions(obj.get(&Value::String("actions".to_string())))?,
         state: parse_state(obj.get(&Value::String("state".to_string())))?,
     })
+}
+
+/// Parse imports from frontmatter YAML
+pub fn parse_imports(yaml: &str) -> Result<HashMap<String, String>> {
+    let value: Value = serde_yaml_ng::from_str(yaml)
+        .context("Failed to parse YAML frontmatter")?;
+
+    let obj = value
+        .as_mapping()
+        .context("Frontmatter must be a YAML mapping")?;
+
+    // Extract imports
+    let Some(imports_val) = obj.get(&Value::String("imports".to_string())) else {
+        return Ok(HashMap::new());
+    };
+
+    let mapping = imports_val
+        .as_mapping()
+        .context("imports must be a mapping")?;
+
+    let mut imports = HashMap::new();
+    for (key, value) in mapping {
+        let key_str = key
+            .as_str()
+            .context("import key must be a string")?
+            .to_string();
+        let value_str = value
+            .as_str()
+            .context("import value must be a string")?
+            .to_string();
+        imports.insert(key_str, value_str);
+    }
+
+    Ok(imports)
 }
 
 /// Parse filters section

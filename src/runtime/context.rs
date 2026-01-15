@@ -9,6 +9,7 @@ pub struct RuntimeContext {
     pub queries: Value,
     pub state: Value,
     pub form: HashMap<String, String>,
+    pub locals: HashMap<String, Value>,  // For scoped variables like "note" in <each>
 }
 
 impl RuntimeContext {
@@ -18,6 +19,7 @@ impl RuntimeContext {
             queries: json!({}),
             state: json!({}),
             form: HashMap::new(),
+            locals: HashMap::new(),
         }
     }
 
@@ -28,17 +30,24 @@ impl RuntimeContext {
             queries: json!({}),
             state: json!(state),
             form: HashMap::new(),
+            locals: HashMap::new(),
         }
     }
 
     /// Convert context to a JSON object for jaq evaluation
     pub fn to_json(&self) -> Value {
-        json!({
-            "user": self.user,
-            "queries": self.queries,
-            "state": self.state,
-            "form": self.form,
-        })
+        let mut obj = serde_json::Map::new();
+        obj.insert("user".to_string(), self.user.clone());
+        obj.insert("queries".to_string(), self.queries.clone());
+        obj.insert("state".to_string(), self.state.clone());
+        obj.insert("form".to_string(), json!(self.form));
+
+        // Add locals at the top level so they can be accessed directly (e.g., "note" not "locals.note")
+        for (key, value) in &self.locals {
+            obj.insert(key.clone(), value.clone());
+        }
+
+        Value::Object(obj)
     }
 
     /// Evaluate a jq expression against this context
@@ -56,10 +65,7 @@ impl RuntimeContext {
     /// Add a local binding to the context (for use in scoped contexts like <each>)
     pub fn with_local(&self, name: &str, value: Value) -> Self {
         let mut new_ctx = self.clone();
-        // Store local in a special "locals" key
-        if let Value::Object(obj) = &mut new_ctx.state {
-            obj.insert(name.to_string(), value);
-        }
+        new_ctx.locals.insert(name.to_string(), value);
         new_ctx
     }
 

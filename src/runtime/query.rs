@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 
-use crate::runtime::{NostrClient, RuntimeContext};
+use crate::runtime::{AddressLoader, NostrClient, RuntimeContext};
 use crate::parser::ast;
 use crate::runtime::filters::compile_filter;
 use crate::runtime::jaq::JaqEvaluator;
@@ -17,16 +17,24 @@ pub struct QueryRuntime {
     queries: Arc<RwLock<HashMap<String, Vec<Event>>>>,
     /// Broadcast channels for each query (send updates when new events arrive)
     broadcasters: HashMap<String, broadcast::Sender<Vec<Event>>>,
+    /// Version counter that increments on each update (for detecting changes)
+    version: Arc<RwLock<u64>>,
+    /// Loader for addressable events (profiles, etc.)
+    pub address_loader: AddressLoader,
 }
 
 impl QueryRuntime {
     /// Create a new QueryRuntime with a new Nostr client
     pub async fn new() -> Result<Self> {
         let client = NostrClient::new(vec![]).await?;
+        let client_arc = Arc::new(client);
+
         Ok(Self {
-            client: Arc::new(client),
+            client: Arc::clone(&client_arc),
             queries: Arc::new(RwLock::new(HashMap::new())),
             broadcasters: HashMap::new(),
+            version: Arc::new(RwLock::new(0)),
+            address_loader: AddressLoader::new(Arc::clone(&client_arc)),
         })
     }
 
@@ -68,6 +76,8 @@ impl QueryRuntime {
         // Clone references for the background task
         let client = Arc::clone(&self.client);
         let queries = Arc::clone(&self.queries);
+        let version = Arc::clone(&self.version);
+        let address_loader = self.address_loader.clone();
         let query_id = id.clone();
         let tx_clone = tx.clone();
 
@@ -97,27 +107,80 @@ impl QueryRuntime {
                                 // Sort by created_at (newest first)
                                 collected_events.sort_by(|a, b| b.created_at.cmp(&a.created_at));
 
-                                // Apply limit
+                                // Apply limit (keep only the most recent N events)
                                 if let Some(limit) = filter.limit {
                                     collected_events.truncate(limit as usize);
                                 }
 
-                                // Store in queries map
+                                // Store in queries map and increment version
                                 {
                                     let mut queries_lock = queries.write().await;
                                     queries_lock.insert(query_id.clone(), collected_events.clone());
-                                    println!("  ✓ Stored {} events in queries map", collected_events.len());
+
+                                    let mut version_lock = version.write().await;
+                                    *version_lock += 1;
+
+                                    println!("  ✓ Stored {} events in queries map (version: {})", collected_events.len(), *version_lock);
                                 }
 
                                 // Broadcast updated events
                                 let _ = tx_clone.send(collected_events.clone());
 
+                                // If this is the feed query, fetch profiles for new authors
+                                if query_id == "feed" {
+                                    let address_loader_clone = address_loader.clone();
+                                    let queries_clone = Arc::clone(&queries);
+                                    let version_clone = Arc::clone(&version);
+
+                                    tokio::spawn(async move {
+                                        // Extract unique pubkeys from feed
+                                        let pubkeys: Vec<PublicKey> = {
+                                            let queries_lock = queries_clone.read().await;
+                                            if let Some(feed_events) = queries_lock.get("feed") {
+                                                feed_events
+                                                    .iter()
+                                                    .map(|e| e.pubkey)
+                                                    .collect::<std::collections::HashSet<_>>()
+                                                    .into_iter()
+                                                    .collect()
+                                            } else {
+                                                vec![]
+                                            }
+                                        };
+
+                                        if !pubkeys.is_empty() {
+                                            // Load profiles (AddressLoader handles deduplication)
+                                            if let Ok(new_profiles) = address_loader_clone.load_profiles(pubkeys).await {
+                                                if !new_profiles.is_empty() {
+                                                    // Merge with existing profiles
+                                                    let mut queries_lock = queries_clone.write().await;
+                                                    let existing = queries_lock.get("profiles").cloned().unwrap_or_default();
+
+                                                    let mut all_profiles_map: HashMap<String, Event> = HashMap::new();
+                                                    for event in existing {
+                                                        all_profiles_map.insert(event.pubkey.to_hex(), event);
+                                                    }
+                                                    for event in new_profiles {
+                                                        all_profiles_map.insert(event.pubkey.to_hex(), event);
+                                                    }
+
+                                                    let all_profiles: Vec<Event> = all_profiles_map.into_values().collect();
+                                                    queries_lock.insert("profiles".to_string(), all_profiles);
+
+                                                    // Increment version
+                                                    let mut version_lock = version_clone.write().await;
+                                                    *version_lock += 1;
+                                                    println!("  ✓ Profiles updated (version: {})", *version_lock);
+                                                }
+                                            }
+                                        }
+                                    });
+                                }
+
                                 last_update = std::time::Instant::now();
 
-                                // If we've hit the limit, we can stop
-                                if collected_events.len() >= filter.limit.unwrap_or(100) as usize {
-                                    break;
-                                }
+                                // Continue listening for new events (don't break!)
+                                // The limit just controls how many we keep, not when to stop listening
                             }
                         }
                     }
@@ -146,6 +209,11 @@ impl QueryRuntime {
         self.broadcasters.get(id).map(|tx| tx.subscribe())
     }
 
+    /// Get the current version (increments on each update)
+    pub async fn get_version(&self) -> u64 {
+        *self.version.read().await
+    }
+
     /// Convert query events to JSON for use in RuntimeContext
     pub async fn to_json(&self) -> Value {
         let queries = self.queries.read().await;
@@ -156,12 +224,85 @@ impl QueryRuntime {
             json_queries.insert(id.clone(), json!(events_json));
         }
 
+        // Add enrichedFeed by joining feed with profiles
+        if let (Some(feed), Some(profiles)) = (queries.get("feed"), queries.get("profiles")) {
+            let enriched: Vec<Value> = feed.iter().map(|event| {
+                let mut event_json = event_to_json(event);
+
+                // Find matching profile
+                if let Some(profile_event) = profiles.iter().find(|p| p.pubkey == event.pubkey) {
+                    // Parse profile content as JSON
+                    if let Ok(profile_data) = serde_json::from_str::<Value>(&profile_event.content) {
+                        if let Some(obj) = event_json.as_object_mut() {
+                            obj.insert("profile".to_string(), profile_data);
+                        }
+                    }
+                }
+
+                event_json
+            }).collect();
+
+            json_queries.insert("enrichedFeed".to_string(), json!(enriched));
+        }
+
         json!(json_queries)
     }
 
     /// Update the RuntimeContext with current query data
     pub async fn populate_context(&self, ctx: &mut crate::runtime::RuntimeContext) {
         ctx.queries = self.to_json().await;
+    }
+
+    /// Fetch profiles for authors in the feed
+    /// Automatically deduplicates - won't re-fetch already-loaded profiles
+    pub async fn fetch_profiles_for_feed(&self) -> Result<()> {
+        // Get current feed events
+        let feed_events = {
+            let queries = self.queries.read().await;
+            queries.get("feed").cloned().unwrap_or_default()
+        };
+
+        if feed_events.is_empty() {
+            return Ok(());
+        }
+
+        // Extract unique pubkeys
+        let pubkeys: Vec<PublicKey> = feed_events
+            .iter()
+            .map(|e| e.pubkey)
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        // Load profiles (deduplicates automatically via AddressLoader)
+        let new_profiles = self.address_loader.load_profiles(pubkeys).await?;
+
+        // Store profiles in queries if we got any new ones
+        if !new_profiles.is_empty() {
+            let mut queries = self.queries.write().await;
+
+            // Get existing profiles
+            let existing = queries.get("profiles").cloned().unwrap_or_default();
+
+            // Merge profiles (deduplicate by pubkey)
+            let mut all_profiles_map: HashMap<String, Event> = HashMap::new();
+            for event in existing {
+                all_profiles_map.insert(event.pubkey.to_hex(), event);
+            }
+            for event in new_profiles {
+                all_profiles_map.insert(event.pubkey.to_hex(), event);
+            }
+
+            let all_profiles: Vec<Event> = all_profiles_map.into_values().collect();
+            queries.insert("profiles".to_string(), all_profiles);
+
+            // Increment version to trigger UI update
+            let mut version = self.version.write().await;
+            *version += 1;
+            println!("  ✓ Profiles updated (version: {})", *version);
+        }
+
+        Ok(())
     }
 }
 

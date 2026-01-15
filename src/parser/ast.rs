@@ -6,6 +6,9 @@ use std::collections::HashMap;
 pub struct Document {
     /// Version string (e.g., "1.0.0")
     pub version: String,
+    /// Component imports (name → file path)
+    #[serde(default)]
+    pub imports: HashMap<String, String>,
     /// Frontmatter containing filters, pipes, actions, and state
     pub frontmatter: Frontmatter,
     /// Markdown body rendered as nodes
@@ -16,6 +19,7 @@ impl Document {
     pub fn new(frontmatter: Frontmatter, body: Vec<Node>) -> Self {
         Self {
             version: "1.0.0".to_string(),
+            imports: HashMap::new(),
             frontmatter,
             body,
         }
@@ -307,12 +311,31 @@ pub enum Node {
         #[serde(skip_serializing_if = "Option::is_none")]
         size: Option<f64>,
     },
+    /// Custom component (imported from .hnmc file)
+    CustomComponent {
+        /// Component name (e.g., "Profile", "Feed")
+        name: String,
+        /// Props passed to component
+        props: HashMap<String, PropValue>,
+        /// Children nodes (for components that accept children)
+        children: Vec<Node>,
+    },
 }
 
 /// List item node
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ListItem {
     pub children: Vec<Node>,
+}
+
+/// Prop value for custom components
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PropValue {
+    /// Literal string value
+    Literal(String),
+    /// Expression that evaluates at runtime: {note.pubkey}
+    Expression(String),
 }
 
 impl Node {

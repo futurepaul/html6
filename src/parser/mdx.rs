@@ -328,7 +328,26 @@ fn build_component_from_jsx(
         }
 
         _ => {
-            return Err(anyhow::anyhow!("Unknown component: <{}>", tag));
+            // Check if tag starts with uppercase (custom component convention)
+            if tag.chars().next().map_or(false, |c| c.is_uppercase()) {
+                // This is a custom component - convert attrs to PropValue HashMap
+                let mut props = std::collections::HashMap::new();
+                for (key, value) in attrs {
+                    let prop_value = match value {
+                        AttrValue::Literal(s) => crate::parser::ast::PropValue::Literal(s),
+                        AttrValue::Expression(e) => crate::parser::ast::PropValue::Expression(e),
+                    };
+                    props.insert(key, prop_value);
+                }
+
+                Node::CustomComponent {
+                    name: tag.to_string(),
+                    props,
+                    children,
+                }
+            } else {
+                return Err(anyhow::anyhow!("Unknown component: <{}>", tag));
+            }
         }
     };
 

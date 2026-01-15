@@ -1,0 +1,24 @@
+---
+imports:
+  Profile: "./Profile.hnmc"
+
+props:
+  limit: number
+---
+
+<each from={queries.enrichedFeed} as="note">
+
+<Profile
+  pubkey={note.pubkey}
+  name={note.profile.name // "Unknown"}
+  picture={note.profile.picture // ""} />
+
+<vstack>
+
+{note.content}
+
+---
+
+</vstack>
+
+</each>
